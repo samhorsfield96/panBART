@@ -1,0 +1,16 @@
+name: panGPT
+channels:
+  - conda-forge
+  - bioconda
+  - pytorch
+  - huggingface
+  - defaults
+dependencies:
+  - python=3.8
+  - psutil
+  - scikit-learn 
+  - tensorboard
+  - tokenizers
+  - pytorch
+  - cudatoolkit=10.2
+  - transformers
