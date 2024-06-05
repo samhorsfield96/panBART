@@ -18,8 +18,7 @@ import warnings
 import random
 import numpy as np
 from tqdm import tqdm
-from transformers import LongformerConfig, LongformerSelfAttention
-from longformer_encoder_decoder import *
+from transformers import LongformerConfig, LongformerSelfAttention, LEDModel
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -74,7 +73,7 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Train a transformer model on (pan)'omic data.")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input file")
-    parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "longformer"], help="Type of model to use: 'transformer' or 'longformer'")
+    parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "longformer", "BARTlongformer"], help="Type of model to use: 'transformer' or 'longformer'")
     parser.add_argument("--longformer_attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
@@ -599,8 +598,34 @@ class LongformerModel(nn.Module):
 
         return self.out(x)
 
+class BARTLongformerModel(nn.Module):
+    def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length,
+                 dropout_rate, pe_max_len, pe_dropout_rate, longformer_config):
+        super(BARTLongformerModel, self).__init__()
+        self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
+        self.vocab_size = vocab_size
+        self.embed = nn.Embedding(vocab_size, embed_dim)
 
+        self.longformer_layers = nn.ModuleList([
+            LongformerSelfAttention(longformer_config, layer_id=i)
+            for i in range(num_layers)
+        ])
 
+        self.out = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, x):
+        x = self.embed(x)
+        x = self.pos_encoding(x)
+
+        attention_mask = torch.ones(x.size()[:-1], dtype=torch.long, device=x.device)
+
+        # Generate is_index_masked tensor
+        is_index_masked = torch.zeros_like(attention_mask, dtype=torch.bool)
+
+        for longformer_layer in self.longformer_layers:
+            x = longformer_layer(x, attention_mask=attention_mask, is_index_masked=is_index_masked)[0]
+
+        return self.out(x)
 
 class GenomeDataset(torch.utils.data.Dataset):
     """
@@ -704,7 +729,7 @@ elif model_type == 'longformer':
     model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
 elif model_type == 'BARTlongformer':
     attention_window = args.longformer_attention_window
-    longformer_config = LongformerConfig(
+    BARTlongformer_config = LongformerEncoderDecoderConfig(
         hidden_size=embed_dim,
         num_attention_heads=num_heads,
         num_hidden_layers=num_layers,
