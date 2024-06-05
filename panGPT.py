@@ -19,6 +19,7 @@ import random
 import numpy as np
 from tqdm import tqdm
 from transformers import LongformerConfig, LongformerSelfAttention
+from longformer_encoder_decoder import *
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -701,6 +702,16 @@ elif model_type == 'longformer':
         intermediate_size=4 * embed_dim,
     )
     model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
+elif model_type == 'BARTlongformer':
+    attention_window = args.longformer_attention_window
+    longformer_config = LongformerConfig(
+        hidden_size=embed_dim,
+        num_attention_heads=num_heads,
+        num_hidden_layers=num_layers,
+        attention_window=[attention_window] * num_layers,
+        intermediate_size=4 * embed_dim,
+    )
+    model = BARTLongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
 else:
     raise ValueError(f"Invalid model type: {model_type}")
 

@@ -40,7 +40,7 @@ Ensure that you have Conda installed on your system. If Conda is not installed, 
 It's recommended to create a new Conda environment for `panGPT` and `panPrompt` to avoid conflicts with existing libraries. Here I call this environment `panAI`, but you can call it whatever makes sense for you.
 
 ```bash
-conda create -n panAI python=3.8
+conda create -n panAI python=3.8 psutil scikit-learn tensorboard
 ```
 
 #### Step 2: Activate the virtual environment
@@ -58,6 +58,11 @@ conda install pytorch cudatoolkit=10.2 -c pytorch
 Install the tokenizers library, which is required for text tokenization.
 ```bash
 conda install tokenizers
+```
+
+Install the transformers library required for specification of model architecture
+```bash
+conda install -c huggingface transformers
 ```
 
 #### Step 4: Clone the repository:
@@ -86,10 +91,10 @@ python -m venv panAI -env
 ```bash
 source pangpt-env/bin/activate
 ```
-#### Step 3: Install PyTorch and the Tokenizers library
+#### Step 3: Install PyTorch, Tokenizers and Transformers library
 Install PyTorch using pip. Visit the PyTorch Get Started page to find the installation command that matches your system configuration (e.g., with or without GPU support).
 ```bash
-pip install torch tokenizers
+pip install torch tokenizers transformers
 ```
 
 #### Step 4: Clone the repository:
