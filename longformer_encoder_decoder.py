@@ -76,3 +76,36 @@ class LongformerSelfAttentionForBart(nn.Module):
 
         return (attn_output,) + outputs[1:] if len(outputs) == 2 else (attn_output, None)
     
+class BARTLongformerModel(nn.Module):
+    def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length,
+                 dropout_rate, pe_max_len, pe_dropout_rate, longformer_config):
+        super(BARTLongformerModel, self).__init__()
+        self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
+        self.vocab_size = vocab_size
+        self.embed = nn.Embedding(vocab_size, embed_dim)
+        self.embed_dim = embed_dim
+
+        self.longformer_layers = nn.ModuleList([
+            LongformerSelfAttention(longformer_config, layer_id=i)
+            for i in range(num_layers)
+        ])
+
+        self.out = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, x):
+        x = self.embed(x)
+        x = self.pos_encoding(x)
+
+        tgt_len, bsz, embed_dim = x.size()
+        assert embed_dim == self.embed_dim
+        assert list(x.size()) == [tgt_len, bsz, embed_dim]
+
+        attention_mask = torch.ones(x.size()[:-1], dtype=torch.long, device=x.device)
+
+        # Generate is_index_masked tensor
+        is_index_masked = torch.zeros_like(attention_mask, dtype=torch.bool)
+
+        for longformer_layer in self.longformer_layers:
+            x = longformer_layer(x, attention_mask=attention_mask, is_index_masked=is_index_masked)[0]
+
+        return self.out(x)
