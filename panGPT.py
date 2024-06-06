@@ -18,7 +18,7 @@ import warnings
 import random
 import numpy as np
 from tqdm import tqdm
-from transformers import LongformerConfig, LongformerSelfAttention, LEDModel
+from transformers import LongformerConfig, LongformerSelfAttention, LEDModel, LEDConfig, LEDForConditionalGeneration
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -308,7 +308,7 @@ def _is_compatible_checkpoint(model, checkpoint):
     by comparing the vocabulary sizes of the model and the checkpoint.
     """
 
-    return model.vocab_size == checkpoint["model_state_dict"]["embed.weight"].size(0)
+    return model.config.vocab_size == checkpoint["model_state_dict"]["embed.weight"].size(0)
 
 def train_model(train_loader, model, optimizer, criterion, device):
     """
@@ -333,8 +333,8 @@ def train_model(train_loader, model, optimizer, criterion, device):
     for i, (input_ids, labels) in enumerate(train_loader):  # Added enumeration for clarity
         input_ids, labels = input_ids.to(device), labels.to(device)  # Move data to the appropriate device
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids)  # Generate predictions
-        loss = criterion(outputs.view(-1, model.vocab_size), labels.view(-1))
+        outputs = model(input_ids).logits  # Generate predictions
+        loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
 
@@ -400,8 +400,8 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
         for inputs, labels in val_loader:  # Correctly unpack the tuples returned by the DataLoader
             inputs, labels = inputs.to(device), labels.to(device)  # Move data to the appropriate device
 
-            outputs = model(inputs)  # Generate predictions from the model
-            loss = criterion(outputs.view(-1, model.vocab_size), labels.view(-1))
+            outputs = model(inputs).logits  # Generate predictions from the model
+            loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
             total_val_loss += loss.item() * inputs.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
@@ -598,35 +598,6 @@ class LongformerModel(nn.Module):
 
         return self.out(x)
 
-class BARTLongformerModel(nn.Module):
-    def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length,
-                 dropout_rate, pe_max_len, pe_dropout_rate, longformer_config):
-        super(BARTLongformerModel, self).__init__()
-        self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
-        self.vocab_size = vocab_size
-        self.embed = nn.Embedding(vocab_size, embed_dim)
-
-        self.longformer_layers = nn.ModuleList([
-            LongformerSelfAttention(longformer_config, layer_id=i)
-            for i in range(num_layers)
-        ])
-
-        self.out = nn.Linear(embed_dim, vocab_size)
-
-    def forward(self, x):
-        x = self.embed(x)
-        x = self.pos_encoding(x)
-
-        attention_mask = torch.ones(x.size()[:-1], dtype=torch.long, device=x.device)
-
-        # Generate is_index_masked tensor
-        is_index_masked = torch.zeros_like(attention_mask, dtype=torch.bool)
-
-        for longformer_layer in self.longformer_layers:
-            x = longformer_layer(x, attention_mask=attention_mask, is_index_masked=is_index_masked)[0]
-
-        return self.out(x)
-
 class GenomeDataset(torch.utils.data.Dataset):
     """
     Dataset class for genomic data.
@@ -728,15 +699,22 @@ elif model_type == 'longformer':
     )
     model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
 elif model_type == 'BARTlongformer':
+    # from https://huggingface.co/docs/transformers/v4.41.3/en/model_doc/led
     attention_window = args.longformer_attention_window
-    BARTlongformer_config = LongformerEncoderDecoderConfig(
-        hidden_size=embed_dim,
-        num_attention_heads=num_heads,
-        num_hidden_layers=num_layers,
-        attention_window=[attention_window] * num_layers,
-        intermediate_size=4 * embed_dim,
+    BARTlongformer_config = LEDConfig(
+        vocab_size=vocab_size,
+        d_model=embed_dim,
+        encoder_layers=num_layers,
+        decoder_layers=num_layers,
+        encoder_attention_heads=num_heads,
+        decoder_attention_heads=num_heads,
+        decoder_ffn_dim=4 * embed_dim,
+        encoder_ffn_dim=4 * embed_dim,
+        max_encoder_position_embeddings=pe_max_len,
+        max_decoder_position_embeddings=pe_max_len,
+        dropout=model_dropout_rate
     )
-    model = BARTLongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
+    model = LEDForConditionalGeneration(BARTlongformer_config)
 else:
     raise ValueError(f"Invalid model type: {model_type}")
 
