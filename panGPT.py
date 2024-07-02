@@ -446,7 +446,7 @@ logging.info(
 )
 
 tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
-tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
 trainer = trainers.WordLevelTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
 tokenizer.train_from_iterator(genomes, trainer)
 tokenizer.save(tokenizer_file)
