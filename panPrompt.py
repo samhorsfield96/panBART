@@ -163,7 +163,7 @@ def predict_next_tokens_BART(model, tokenizer, input_ids, temperature=1.0, max_l
     if max_length is None:
         max_length = len(input_ids[0])
     summary_ids = model.generate(input_ids, max_length=max_length, temperature=temperature, do_sample=True)[0].tolist()
-    print(summary_ids)
+    #print(summary_ids)
     return tokenizer.decode(summary_ids, skip_special_tokens=True)
 
 def read_prompt_file(file_path):
@@ -208,11 +208,13 @@ def main():
         model.pos_encoding.pe = model.pos_encoding.pe[:args.max_len, :].to(device)  # Adjust the positional encoding based on max_len and device
 
     prompt = read_prompt_file(args.prompt_file)
+    #if args.model_type == "BARTlongformer":
+        #prompt = mask_integers(prompt, prop_masked)
+        
     tokens = tokenizer.encode(prompt).ids
     input_ids = torch.tensor([tokens])
     for _ in range(num_seq):
         if args.model_type == "BARTlongformer":
-            #prompt = mask_integers(original_prompt, prop_masked)
             predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, args.temperature)
         else:
             #prompt = original_prompt
