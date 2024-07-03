@@ -18,7 +18,7 @@ import warnings
 import random
 import numpy as np
 from tqdm import tqdm
-from transformers import LongformerConfig, LongformerSelfAttention, LEDModel, LEDConfig, LEDForConditionalGeneration
+from transformers import LongformerConfig, LongformerSelfAttention, LEDConfig, LEDForConditionalGeneration
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -445,9 +445,9 @@ logging.info(
     f"Sequence lengths - Min: {min_sequence_length}, Max: {max_sequence_length}, Avg: {avg_sequence_length:.2f}"
 )
 
-tokenizer = Tokenizer(models.WordLevel(unk_token="[UNK]"))
+tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
 tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
-trainer = trainers.WordLevelTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
+trainer = trainers.BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
 tokenizer.train_from_iterator(genomes, trainer)
 tokenizer.save(tokenizer_file)
 tokenizer = Tokenizer.from_file(tokenizer_file)
