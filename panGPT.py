@@ -453,21 +453,15 @@ logging.info(
 )
 
 
-tokenizer = ByteLevelBPETokenizer()
+#tokenizer = ByteLevelBPETokenizer()
 #tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
-tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
+#tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
 #trainer = trainers.BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
-tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=[
-        "<s>",
-        "<pad>",
-        "</s>",
-        "<unk>",
-        "<mask>",
-    ])
-Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
-tokenizer.save_pretrained(tokenizer_dir)
-tokenizer = LEDTokenizer.from_pretrained(tokenizer_dir)
-vocab_size = tokenizer.vocab_size()
+#tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=["<s>","<pad>", "</s>","<unk>", "<mask>",])
+#Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
+#tokenizer.save_model(tokenizer_dir)
+tokenizer = LEDTokenizer.from_pretrained(tokenizer_dir, add_prefix_space=True)
+#vocab_size = tokenizer.vocab_size()
 
 if train_size + val_size > 1.0:
     raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
@@ -640,7 +634,7 @@ class GenomeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         text = self.texts[idx]
-        encoded = self.tokenizer.encode(text).ids
+        encoded = self.tokenizer.encode(text)
 
         # Ensure the sequence is not longer than max_length
         if len(encoded) > self.max_length:
@@ -652,15 +646,15 @@ class GenomeDataset(torch.utils.data.Dataset):
         label_ids = encoded[1:]
 
         # Pad the sequence to the nearest multiple of the attention window size (for Longformer)
-        if hasattr(self, 'attention_window'):
-            seq_length = len(input_ids)
-            padded_length = ((seq_length + self.attention_window - 1) // self.attention_window) * self.attention_window
-            input_ids = input_ids + [self.tokenizer.token_to_id("[PAD]")] * (padded_length - seq_length)
-            label_ids = label_ids + [self.tokenizer.token_to_id("[PAD]")] * (padded_length - seq_length)
-        else:
-            # Pad the sequence to max_length (for transformer)
-            input_ids = input_ids + [self.tokenizer.token_to_id("[PAD]")] * (self.max_length - 1 - len(input_ids))
-            label_ids = label_ids + [self.tokenizer.token_to_id("[PAD]")] * (self.max_length - 1 - len(label_ids))
+        # if hasattr(self, 'attention_window'):
+        #     seq_length = len(input_ids)
+        #     padded_length = ((seq_length + self.attention_window - 1) // self.attention_window) * self.attention_window
+        #     input_ids = input_ids + [self.tokenizer.token_to_id("<pad>")] * (padded_length - seq_length)
+        #     label_ids = label_ids + [self.tokenizer.token_to_id("<pad>")] * (padded_length - seq_length)
+        # else:
+        #     # Pad the sequence to max_length (for transformer)
+        #     input_ids = input_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(input_ids))
+        #     label_ids = label_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(label_ids))
 
         return torch.tensor(input_ids, dtype=torch.long), torch.tensor(label_ids, dtype=torch.long)
 
