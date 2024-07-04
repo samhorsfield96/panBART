@@ -77,8 +77,8 @@ def parse_args():
     parser.add_argument("--longformer_attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=4, help="Number of transformer layers")
-    parser.add_argument("--max_seq_length", type=int, default=256, help="Maximum sequence length")
+    parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers")
+    parser.add_argument("--max_seq_length", type=int, default=4096, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training and validation")
     parser.add_argument("--model_dropout_rate", type=float, default=0.2, help="Dropout rate for the model")
     parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate")
@@ -94,7 +94,7 @@ def parse_args():
     parser.add_argument("--train_size", type=float, default=0.8, help="Proportion of the dataset to include in the training set")
     parser.add_argument("--val_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--pe_max_len", type=int, default=5000, help="Maximum length for positional encoding")
+    parser.add_argument("--pe_max_len", type=int, default=12800, help="Maximum length for positional encoding")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
     
@@ -104,7 +104,7 @@ def parse_args():
     if args.pe_max_len < args.max_seq_length:
         raise ValueError(f"Error: pe_max_len ({args.pe_max_len}) must be greater than or equal to max_seq_length ({args.max_seq_length}).")
 
-    if args.model_type == "longformer":
+    if args.model_type == "longformer" or args.model_type == "BARTlongformer":
         # Ensure max_seq_length is greater than or equal to longformer_attention_window
         args.max_seq_length = max(args.max_seq_length, args.longformer_attention_window)
         # Round down max_seq_length to the nearest multiple of longformer_attention_window
@@ -143,7 +143,7 @@ pe_dropout_rate = args.pe_dropout_rate
 log_dir = args.log_dir
 
 # Check if max_seq_length is a multiple of longformer_attention_window when using Longformer
-if model_type == "longformer" and max_seq_length % longformer_attention_window != 0:
+if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % longformer_attention_window != 0:
     logging.info(f"Error: When using the Longformer model, the maximum sequence length (max_seq_length) must be a multiple of the attention window size (longformer_attention_window).")
     logging.info(f"Current values: max_seq_length = {max_seq_length}, longformer_attention_window = {longformer_attention_window}")
     logging.info("Please adjust these values and try again.")
@@ -332,8 +332,12 @@ def train_model(train_loader, model, optimizer, criterion, device):
     total_train_loss = 0
     for i, (input_ids, labels) in enumerate(train_loader):  # Added enumeration for clarity
         input_ids, labels = input_ids.to(device), labels.to(device)  # Move data to the appropriate device
+        
+        # set global attention for all tokens so that all positions attend to all others.
+        global_attention_mask = torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids).logits  # Generate predictions
+        outputs = model(input_ids, global_attention_mask=global_attention_mask).logits  # Generate predictions
         loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
@@ -700,7 +704,6 @@ elif model_type == 'longformer':
     model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
 elif model_type == 'BARTlongformer':
     # from https://huggingface.co/docs/transformers/v4.41.3/en/model_doc/led
-    attention_window = args.longformer_attention_window
     BARTlongformer_config = LEDConfig(
         vocab_size=vocab_size,
         d_model=embed_dim,
@@ -712,7 +715,8 @@ elif model_type == 'BARTlongformer':
         encoder_ffn_dim=4 * embed_dim,
         max_encoder_position_embeddings=pe_max_len,
         max_decoder_position_embeddings=pe_max_len,
-        dropout=model_dropout_rate
+        dropout=model_dropout_rate,
+        attention_window = args.longformer_attention_window
     )
     model = LEDForConditionalGeneration(BARTlongformer_config)
 else:

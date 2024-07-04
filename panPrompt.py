@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from transformers import LEDConfig, LEDForConditionalGeneration
 import numpy as np
 import argparse
+from tqdm import tqdm
 
 class PositionalEncoding(nn.Module):
     """
@@ -157,19 +158,25 @@ def predict_next_tokens(model, tokenizer, tokens, num_tokens, temperature=1.0):
         tokens.append(next_token_id)
     return tokenizer.decode(tokens)
 
-def predict_next_tokens_BART(model, tokenizer, input_ids, temperature=1.0, max_length=None):
+def predict_next_tokens_BART(model, tokenizer, input_ids, temperature=1.0, max_length=None, ):
     model.eval()
     # Generate Summary
     if max_length is None:
         max_length = len(input_ids[0])
-    summary_ids = model.generate(input_ids, max_length=max_length, temperature=temperature, do_sample=True)[0].tolist()
+
+    # ensure all tokens attend to all others
+    global_attention_mask = torch.ones(input_ids)
+
+    summary_ids = model.generate(input_ids, global_attention_mask=global_attention_mask, max_length=max_length, temperature=temperature, do_sample=True)[0].tolist()
     #print(summary_ids)
     return tokenizer.decode(summary_ids, skip_special_tokens=True)
 
 def read_prompt_file(file_path):
+    prompt_list = []
     with open(file_path, 'r') as file:
-        prompt = file.read().strip()
-    return prompt
+        for line in file:
+            prompt_list.append(line.strip())
+    return prompt_list
 
 def main():
     print_banner()
@@ -190,8 +197,8 @@ def main():
     parser.add_argument("--reformer_buckets", type=int, default=32, help="Number of buckets in the Reformer model.")
     parser.add_argument("--reformer_hashes", type=int, default=4, help="Number of hashes in the Reformer model.")
     parser.add_argument("--prop_masked", type=float, default=0.5, help="Proportion of prompt to be masked. Default = 0.5")
-    parser.add_argument("--num_seq", type=int, default=10, help="Number of simulations. Default = 10")
-    parser.add_argument("--pe_max_len", type=int, default=5000, help="Maximum length for positional encoding")
+    parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
+    parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -203,24 +210,28 @@ def main():
     vocab_size = tokenizer.get_vocab_size()
 
     model = load_model(args.model_path, args.model_type, args.embed_dim, args.num_heads, args.num_layers,
-                        args.max_seq_length, device, vocab_size, args.pe_max_len, args.reformer_depth, args.reformer_buckets, args.reformer_hashes)
+                        args.max_seq_length, device, vocab_size, args.max_len, args.reformer_depth, args.reformer_buckets, args.reformer_hashes)
     if args.model_type == 'transformer':
         model.pos_encoding.pe = model.pos_encoding.pe[:args.max_len, :].to(device)  # Adjust the positional encoding based on max_len and device
 
-    prompt = read_prompt_file(args.prompt_file)
+    prompt_list = read_prompt_file(args.prompt_file)
     #if args.model_type == "BARTlongformer":
         #prompt = mask_integers(prompt, prop_masked)
         
-    tokens = tokenizer.encode(prompt).ids
-    input_ids = torch.tensor([tokens])
-    for _ in range(num_seq):
-        if args.model_type == "BARTlongformer":
-            predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, args.temperature)
-        else:
-            #prompt = original_prompt
-            predicted_text = predict_next_tokens(model, tokenizer, tokens, args.num_tokens, args.temperature)
-        print("Prompt:", prompt)
-        print("Predicted text:", predicted_text)
+    with open(args.outfile, "w") as f:
+        for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list)):
+            tokens = tokenizer.encode(prompt).ids
+            input_ids = torch.tensor([tokens])
+            #print(prompt)
+            for _ in tqdm(range(num_seq), desc="Simulation number", total=num_seq):
+                if args.model_type == "BARTlongformer":
+                    predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, args.temperature)
+                else:
+                    #prompt = original_prompt
+                    predicted_text = predict_next_tokens(model, tokenizer, tokens, args.num_tokens, args.temperature)
+                #print("Prompt:", prompt)
+                #print("Predicted text:", predicted_text)
+                f.write(predicted_text + "\n")
 
 
 if __name__ == "__main__":
