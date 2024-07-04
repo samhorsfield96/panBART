@@ -10,7 +10,7 @@ import psutil
 import gc
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, cohen_kappa_score
-from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers, ByteLevelBPETokenizer
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -18,7 +18,8 @@ import warnings
 import random
 import numpy as np
 from tqdm import tqdm
-from transformers import LongformerConfig, LongformerSelfAttention, LEDConfig, LEDForConditionalGeneration
+from transformers import LongformerConfig, LongformerSelfAttention, LEDConfig, LEDForConditionalGeneration, LEDTokenizer
+from pathlib import Path
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -90,13 +91,14 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--max_vocab_size", type=int, default=70000, help="Maximum vocabulary size. Tokens beyond this size will be mapped to <UNK>.")
     parser.add_argument("--model_save_path", type=str, default="./model_checkpoint.pth", help="Path to save the model checkpoint")
-    parser.add_argument("--tokenizer_file", type=str, default="./pangenome_gpt_tokenizer.json", help="Filename for saving and loading the tokenizer")
+    parser.add_argument("--tokenizer_dir", type=str, default="./pangenome_gpt_tokenizer", help="Dirname for saving and loading the tokenizer")
     parser.add_argument("--train_size", type=float, default=0.8, help="Proportion of the dataset to include in the training set")
     parser.add_argument("--val_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--pe_max_len", type=int, default=12800, help="Maximum length for positional encoding")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
+    parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
     
     args = parser.parse_args()
 
@@ -134,7 +136,7 @@ min_delta = args.min_delta
 epochs = args.epochs
 max_vocab_size = args.max_vocab_size
 model_save_path = args.model_save_path
-tokenizer_file = args.tokenizer_file
+tokenizer_dir = args.tokenizer_dir
 train_size = args.train_size
 val_size = args.val_size
 seed = args.seed
@@ -334,7 +336,8 @@ def train_model(train_loader, model, optimizer, criterion, device):
         input_ids, labels = input_ids.to(device), labels.to(device)  # Move data to the appropriate device
         
         # set global attention for all tokens so that all positions attend to all others.
-        global_attention_mask = torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        global_attention_mask = torch.zeros(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        global_attention_mask[:,[0]] = 1
         
         optimizer.zero_grad()  # Clear gradients before calculating them
         outputs = model(input_ids, global_attention_mask=global_attention_mask).logits  # Generate predictions
@@ -449,13 +452,22 @@ logging.info(
     f"Sequence lengths - Min: {min_sequence_length}, Max: {max_sequence_length}, Avg: {avg_sequence_length:.2f}"
 )
 
-tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
+
+tokenizer = ByteLevelBPETokenizer()
+#tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
 tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
-trainer = trainers.BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
-tokenizer.train_from_iterator(genomes, trainer)
-tokenizer.save(tokenizer_file)
-tokenizer = Tokenizer.from_file(tokenizer_file)
-vocab_size = tokenizer.get_vocab_size()
+#trainer = trainers.BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
+tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=[
+        "<s>",
+        "<pad>",
+        "</s>",
+        "<unk>",
+        "<mask>",
+    ])
+Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
+tokenizer.save_pretrained(tokenizer_dir)
+tokenizer = LEDTokenizer.from_pretrained(tokenizer_dir)
+vocab_size = tokenizer.vocab_size()
 
 if train_size + val_size > 1.0:
     raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
@@ -744,8 +756,13 @@ criterion = torch.nn.CrossEntropyLoss() # what are we trying to optimize?
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
 lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience, verbose=True) # taking big, then small steps
 
+if torch.cuda.is_available():
+    print("GPU available, using cuda, device: {}".format(str(args.device)))
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Run on a GPU if one is available
+    device = torch.device("cuda:" + str(args.device)) # Run on a GPU if one is available
+else:
+    print("GPU not available, using cpu.")
+    device = torch.device("cpu")
 logging.info(f"device = {device}")
 model.to(device)
 
