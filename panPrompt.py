@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 import math
 import torch.nn.functional as F
 #from panGPT import SimpleTransformerModel, SimpleReformerModel
-from transformers import LEDConfig, LEDForConditionalGeneration
+from transformers import LEDConfig, LEDForConditionalGeneration, LEDTokenizer
 import numpy as np
 import argparse
 from tqdm import tqdm
@@ -91,7 +91,7 @@ def print_banner():
     '''
     print(banner)
 
-def load_model(model_path, model_type, embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, pe_max_len, reformer_depth=None, reformer_buckets=None, reformer_hashes=None):
+def load_model(model_path, model_type, embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, pe_max_len, longformer_attention_window=None, reformer_depth=None, reformer_buckets=None, reformer_hashes=None):
     # Infer the vocab size from the model checkpoint
     checkpoint = torch.load(model_path, map_location=device)
     #vocab_size = checkpoint['model_state_dict']['embed.weight'].size(0)
@@ -111,7 +111,8 @@ def load_model(model_path, model_type, embed_dim, num_heads, num_layers, max_seq
             decoder_ffn_dim=4 * embed_dim,
             encoder_ffn_dim=4 * embed_dim,
             max_encoder_position_embeddings=pe_max_len,
-            max_decoder_position_embeddings=pe_max_len
+            max_decoder_position_embeddings=pe_max_len,
+            attention_window = longformer_attention_window
         )
         model = LEDForConditionalGeneration(BARTlongformer_config)
     else:
@@ -123,7 +124,8 @@ def load_model(model_path, model_type, embed_dim, num_heads, num_layers, max_seq
 
 
 def load_tokenizer(tokenizer_path):
-    return Tokenizer.from_file(tokenizer_path)
+    #return Tokenizer.from_file(tokenizer_path)
+    return LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
 
 def mask_integers(string, prop_masked):   
     # Identify the indices of the integers in the list
@@ -139,7 +141,7 @@ def mask_integers(string, prop_masked):
         indices_to_mask = np.empty(shape=[0, 0])
     
     # Replace selected indices with "[MASK]"
-    integer_indices[indices_to_mask] = "[MASK]"
+    integer_indices[indices_to_mask] = "<mask>"
     
     # Reconstruct the string
     masked_string = ' '.join(integer_indices.tolist())
@@ -158,14 +160,17 @@ def predict_next_tokens(model, tokenizer, tokens, num_tokens, temperature=1.0):
         tokens.append(next_token_id)
     return tokenizer.decode(tokens)
 
-def predict_next_tokens_BART(model, tokenizer, input_ids, temperature=1.0, max_length=None, ):
+def predict_next_tokens_BART(model, tokenizer, input_ids, device, temperature=1.0, max_length=None):
     model.eval()
     # Generate Summary
     if max_length is None:
         max_length = len(input_ids[0])
 
-    # ensure all tokens attend to all others
-    global_attention_mask = torch.ones(input_ids)
+    input_ids = input_ids.to(device)
+
+    # ensure all tokens attend globally just to first token
+    global_attention_mask = torch.zeros(input_ids.shape, dtype=torch.long, device=input_ids.device)
+    global_attention_mask[:,[0]] = 1
 
     summary_ids = model.generate(input_ids, global_attention_mask=global_attention_mask, max_length=max_length, temperature=temperature, do_sample=True)[0].tolist()
     #print(summary_ids)
@@ -189,10 +194,11 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for prediction.")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
-    parser.add_argument("--num_layers", type=int, default=4, help="Number of transformer layers.")
+    parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
     parser.add_argument("--max_seq_length", type=int, default=256, help="Maximum sequence length.")
     parser.add_argument("--device", type=str, default='cpu', help="Device to run the model on (e.g., 'cpu' or 'cuda').")
     parser.add_argument("--max_len", type=int, default=5000, help="Maximum length for positional encoding.")
+    parser.add_argument("--longformer_attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--reformer_depth", type=int, default=6, help="Depth of the Reformer model.")
     parser.add_argument("--reformer_buckets", type=int, default=32, help="Number of buckets in the Reformer model.")
     parser.add_argument("--reformer_hashes", type=int, default=4, help="Number of hashes in the Reformer model.")
@@ -207,10 +213,10 @@ def main():
     num_seq = args.num_seq
 
     tokenizer = load_tokenizer(args.tokenizer_path)
-    vocab_size = tokenizer.get_vocab_size()
+    vocab_size = tokenizer.vocab_size
 
     model = load_model(args.model_path, args.model_type, args.embed_dim, args.num_heads, args.num_layers,
-                        args.max_seq_length, device, vocab_size, args.max_len, args.reformer_depth, args.reformer_buckets, args.reformer_hashes)
+                        args.max_seq_length, device, vocab_size, args.max_len, args.longformer_attention_window, args.reformer_depth, args.reformer_buckets, args.reformer_hashes)
     if args.model_type == 'transformer':
         model.pos_encoding.pe = model.pos_encoding.pe[:args.max_len, :].to(device)  # Adjust the positional encoding based on max_len and device
 
@@ -220,12 +226,12 @@ def main():
         
     with open(args.outfile, "w") as f:
         for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list)):
-            tokens = tokenizer.encode(prompt).ids
+            tokens = tokenizer.encode(prompt)
             input_ids = torch.tensor([tokens])
             #print(prompt)
             for _ in tqdm(range(num_seq), desc="Simulation number", total=num_seq):
                 if args.model_type == "BARTlongformer":
-                    predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, args.temperature)
+                    predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, device, args.temperature)
                 else:
                     #prompt = original_prompt
                     predicted_text = predict_next_tokens(model, tokenizer, tokens, args.num_tokens, args.temperature)
