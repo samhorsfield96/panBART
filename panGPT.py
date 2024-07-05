@@ -20,6 +20,7 @@ import numpy as np
 from tqdm import tqdm
 from transformers import LongformerConfig, LongformerSelfAttention, LEDConfig, LEDForConditionalGeneration, LEDTokenizer
 from pathlib import Path
+import random
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -332,16 +333,16 @@ def train_model(train_loader, model, optimizer, criterion, device):
 
     model.train()  # Set the model to training mode
     total_train_loss = 0
-    for i, (input_ids, labels) in enumerate(train_loader):  # Added enumeration for clarity
-        input_ids, labels = input_ids.to(device), labels.to(device)  # Move data to the appropriate device
+    for i, (input_ids, attention_mask) in enumerate(train_loader):  # Added enumeration for clarity
+        input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)  # Move data to the appropriate device
         
         # set global attention for all tokens so that all positions attend to all others.
         global_attention_mask = torch.zeros(input_ids.shape, dtype=torch.long, device=input_ids.device)
         global_attention_mask[:,[0]] = 1
         
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids, global_attention_mask=global_attention_mask).logits  # Generate predictions
-        loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
+        outputs = model(input_ids, global_attention_mask=global_attention_mask, attention_mask=attention_mask).logits  # Generate predictions
+        loss = criterion(outputs.view(-1, model.config.vocab_size), input_ids.view(-1))
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
 
@@ -404,21 +405,21 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
     preds_all = []
     labels_all = []
     with torch.no_grad():
-        for inputs, labels in val_loader:  # Correctly unpack the tuples returned by the DataLoader
-            inputs, labels = inputs.to(device), labels.to(device)  # Move data to the appropriate device
+        for inputs, attention_mask in val_loader:  # Correctly unpack the tuples returned by the DataLoader
+            inputs, attention_mask = inputs.to(device), attention_mask.to(device)  # Move data to the appropriate device
 
-            outputs = model(inputs).logits  # Generate predictions from the model
-            loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
+            outputs = model(inputs, attention_mask=attention_mask).logits  # Generate predictions from the model
+            loss = criterion(outputs.view(-1, model.config.vocab_size), inputs.view(-1))
             total_val_loss += loss.item() * inputs.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
-            correct = (preds == labels).sum().item()
-            accuracy = correct / labels.numel()
+            correct = (preds == inputs).sum().item()
+            accuracy = correct / inputs.numel()
             total_accuracy += accuracy * inputs.size(0)  # Accumulate the accuracy
 
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
-            labels_all.extend(labels.view(-1).tolist())
+            labels_all.extend(inputs.view(-1).tolist())
             # Update the progress bar
             if epoch is None:
                 val_loader.set_description("Testing")
@@ -454,14 +455,12 @@ logging.info(
 
 
 #tokenizer = ByteLevelBPETokenizer()
-#tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
 #tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
-#trainer = trainers.BpeTrainer(special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"], vocab_size=vocab_size)
 #tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=["<s>","<pad>", "</s>","<unk>", "<mask>",])
 #Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
 #tokenizer.save_model(tokenizer_dir)
 tokenizer = LEDTokenizer.from_pretrained(tokenizer_dir, add_prefix_space=True)
-#vocab_size = tokenizer.vocab_size()
+vocab_size = tokenizer.vocab_size
 
 if train_size + val_size > 1.0:
     raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
@@ -634,16 +633,44 @@ class GenomeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         text = self.texts[idx]
+
+        # Pad the sequence to the nearest multiple of the attention window size (for Longformer)
+        seq_length = len(text)
         encoded = self.tokenizer.encode(text)
 
-        # Ensure the sequence is not longer than max_length
-        if len(encoded) > self.max_length:
-            encoded = encoded[:self.max_length]
+        # Ensure the sequence is not longer than max_length, take random slice
+        if len(encoded) >= self.max_length:
+            start_index = random.randint(0, len(encoded) - self.max_length)
+            #start_index = 0
+            encoded = encoded[start_index:start_index + self.max_length]
+            attention_mask = torch.ones(len(encoded), dtype=torch.long)
+        else:
+            # ensure you add padding in encoded space, as token length is longer due to BPE
+            len_encoded = len(encoded)
+            
+            #padded_length = ((seq_length + self.attention_window - 1) // self.attention_window) * self.attention_window
+
+            padding = "".join(["<pad>"] * (self.max_length - len_encoded))
+            encoded_padding = self.tokenizer.encode(padding)
+            
+            # remove first <s> and last </s> character
+            encoded_padding = encoded_padding[1:-1]
+
+            encoded.extend(encoded_padding)
+
+            attention_mask = torch.ones(len(encoded), dtype=torch.long)
+            attention_mask[len_encoded:] = 0
+            #print(encoded)
+            #print(attention_mask)
+            #print("Max seq: {} Length encoded: {} Length attention: {} ".format(self.max_length, len(encoded), len(attention_mask)))
+
+        #print(encoded)
+        #print(attention_mask)
         
         # Input is all but the last token
-        input_ids = encoded[:-1]
+        #input_ids = encoded[:-1]
         # Labels are all but the first token, shifted by one
-        label_ids = encoded[1:]
+        #label_ids = encoded[1:]
 
         # Pad the sequence to the nearest multiple of the attention window size (for Longformer)
         # if hasattr(self, 'attention_window'):
@@ -656,8 +683,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         #     input_ids = input_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(input_ids))
         #     label_ids = label_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(label_ids))
 
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(label_ids, dtype=torch.long)
-
+        return torch.tensor(encoded, dtype=torch.long), attention_mask
 
 class EarlyStopping:
     """
@@ -734,14 +760,14 @@ print(f"Total number of trainable parameters: {total_params}", flush=True)
 
 # training dataset
 train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length)
-if args.model_type == "longformer":
+if args.model_type == "longformer" or args.model_type == "BARTlongformer":
     train_dataset.attention_window = longformer_attention_window
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 train_dataset_size = len(train_loader.dataset)
 
 # validation dataset
 val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length)
-if args.model_type == "longformer":
+if args.model_type == "longformer" or args.model_type == "BARTlongformer":
     val_dataset.attention_window = longformer_attention_window
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 val_dataset_size = len(val_loader.dataset)
@@ -809,7 +835,7 @@ for epoch in range(start_epoch, epochs):
 
 if len(test_genomes) > 0:
     test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length)
-    if args.model_type == "longformer":
+    if args.model_type == "longformer" or args.model_type == "BARTlongformer":
         test_dataset.attention_window = longformer_attention_window
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
