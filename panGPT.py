@@ -75,13 +75,13 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Train a transformer model on (pan)'omic data.")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input file")
-    parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "longformer", "BARTlongformer"], help="Type of model to use: 'transformer' or 'longformer'")
-    parser.add_argument("--longformer_attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
+    #parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "longformer", "BARTlongformer"], help="Type of model to use: 'transformer' or 'longformer'")
+    parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
     parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers")
-    parser.add_argument("--max_seq_length", type=int, default=4096, help="Maximum sequence length")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training and validation")
+    parser.add_argument("--max_seq_length", type=int, default=16384, help="Maximum sequence length")
+    parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training and validation")
     parser.add_argument("--model_dropout_rate", type=float, default=0.2, help="Dropout rate for the model")
     parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate")
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.5, help="Factor by which the learning rate will be reduced by the learning rate scheduler")
@@ -96,7 +96,7 @@ def parse_args():
     parser.add_argument("--train_size", type=float, default=0.8, help="Proportion of the dataset to include in the training set")
     parser.add_argument("--val_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--pe_max_len", type=int, default=12800, help="Maximum length for positional encoding")
+    #parser.add_argument("--pe_max_len", type=int, default=12800, help="Maximum length for positional encoding")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
     parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
@@ -104,14 +104,14 @@ def parse_args():
     args = parser.parse_args()
 
     # Ensure pe_max_len is greater than or equal to max_seq_length
-    if args.pe_max_len < args.max_seq_length:
-        raise ValueError(f"Error: pe_max_len ({args.pe_max_len}) must be greater than or equal to max_seq_length ({args.max_seq_length}).")
+    #if args.pe_max_len < args.max_seq_length:
+    #    raise ValueError(f"Error: pe_max_len ({args.pe_max_len}) must be greater than or equal to max_seq_length ({args.max_seq_length}).")
 
-    if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-        # Ensure max_seq_length is greater than or equal to longformer_attention_window
-        args.max_seq_length = max(args.max_seq_length, args.longformer_attention_window)
-        # Round down max_seq_length to the nearest multiple of longformer_attention_window
-        args.max_seq_length = (args.max_seq_length // args.longformer_attention_window) * args.longformer_attention_window
+    #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
+    # Ensure max_seq_length is greater than or equal to attention_window
+    args.max_seq_length = max(args.max_seq_length, args.attention_window)
+    # Round down max_seq_length to the nearest multiple of attention_window
+    args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
 
 
     return args
@@ -120,8 +120,8 @@ args = parse_args()
 params = vars(args)  # Convert the parsed arguments to a dictionary
 
 input_file = args.input_file
-model_type = args.model_type
-longformer_attention_window=args.longformer_attention_window
+#model_type = args.model_type
+attention_window=args.attention_window
 embed_dim = args.embed_dim
 num_heads = args.num_heads
 num_layers = args.num_layers
@@ -141,14 +141,15 @@ tokenizer_dir = args.tokenizer_dir
 train_size = args.train_size
 val_size = args.val_size
 seed = args.seed
-pe_max_len = args.pe_max_len
+#pe_max_len = args.pe_max_len
 pe_dropout_rate = args.pe_dropout_rate
 log_dir = args.log_dir
 
-# Check if max_seq_length is a multiple of longformer_attention_window when using Longformer
-if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % longformer_attention_window != 0:
-    logging.info(f"Error: When using the Longformer model, the maximum sequence length (max_seq_length) must be a multiple of the attention window size (longformer_attention_window).")
-    logging.info(f"Current values: max_seq_length = {max_seq_length}, longformer_attention_window = {longformer_attention_window}")
+# Check if max_seq_length is a multiple of attention_window when using Longformer
+#if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % attention_window != 0:
+if max_seq_length % attention_window != 0:
+    logging.info(f"Error: When using the LED model, the maximum sequence length (max_seq_length) must be a multiple of the attention window size (attention_window).")
+    logging.info(f"Current values: max_seq_length = {max_seq_length}, attention_window = {attention_window}")
     logging.info("Please adjust these values and try again.")
     exit(1)
 
@@ -196,7 +197,7 @@ def print_parameters_table(params: dict) -> None:
         logging.info(header)
 
         for param, value in params.items():
-            if param == "longformer_attention_window" and params.get("model_type") != "longformer":
+            if param == "attention_window":
                 continue  # Skip this parameter unless 'longformer' model is selected
             logging.info("{:<{width}}: {}".format(param, value, width=max_param_length))
 
@@ -333,12 +334,14 @@ def train_model(train_loader, model, optimizer, criterion, device):
 
     model.train()  # Set the model to training mode
     total_train_loss = 0
-    for i, (input_ids, attention_mask) in enumerate(train_loader):  # Added enumeration for clarity
+    for i, (input_ids, attention_mask, beginning) in enumerate(train_loader):  # Added enumeration for clarity
         input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)  # Move data to the appropriate device
         
+        beginning = torch.nonzero(beginning)
+
         # set global attention for all tokens so that all positions attend to all others.
         global_attention_mask = torch.zeros(input_ids.shape, dtype=torch.long, device=input_ids.device)
-        global_attention_mask[:,[0]] = 1
+        global_attention_mask[beginning,[0]] = 1
         
         optimizer.zero_grad()  # Clear gradients before calculating them
         outputs = model(input_ids, global_attention_mask=global_attention_mask, attention_mask=attention_mask).logits  # Generate predictions
@@ -405,10 +408,15 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
     preds_all = []
     labels_all = []
     with torch.no_grad():
-        for inputs, attention_mask in val_loader:  # Correctly unpack the tuples returned by the DataLoader
+        for inputs, attention_mask, beginning in val_loader:  # Correctly unpack the tuples returned by the DataLoader
             inputs, attention_mask = inputs.to(device), attention_mask.to(device)  # Move data to the appropriate device
 
-            outputs = model(inputs, attention_mask=attention_mask).logits  # Generate predictions from the model
+            beginning = torch.nonzero(beginning)
+
+            global_attention_mask = torch.zeros(inputs.shape, dtype=torch.long, device=inputs.device)
+            global_attention_mask[beginning,[0]] = 1
+
+            outputs = model(inputs, attention_mask=attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions from the model
             loss = criterion(outputs.view(-1, model.config.vocab_size), inputs.view(-1))
             total_val_loss += loss.item() * inputs.size(0)  # Accumulate the loss
 
@@ -505,107 +513,107 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[: x.size(0), :]
         return self.dropout(x)
 
-class SimpleTransformerModel(nn.Module):
-    """
-    Simple transformer model for genomic data.
+# class SimpleTransformerModel(nn.Module):
+#     """
+#     Simple transformer model for genomic data.
 
-    This class defines a simple transformer model architecture for processing genomic data.
+#     This class defines a simple transformer model architecture for processing genomic data.
 
-    Args:
-    - vocab_size (int): Size of the vocabulary.
-    - embed_dim (int): Dimension of the input embeddings.
-    - num_heads (int): Number of attention heads.
-    - num_layers (int): Number of transformer layers.
-    - max_seq_length (int): Maximum sequence length.
-    - dropout_rate (float): Dropout rate.
-    - pe_max_len (int): Maximum length for positional encoding.
-    - pe_dropout_rate (float): Dropout rate for positional encoding.
+#     Args:
+#     - vocab_size (int): Size of the vocabulary.
+#     - embed_dim (int): Dimension of the input embeddings.
+#     - num_heads (int): Number of attention heads.
+#     - num_layers (int): Number of transformer layers.
+#     - max_seq_length (int): Maximum sequence length.
+#     - dropout_rate (float): Dropout rate.
+#     - pe_max_len (int): Maximum length for positional encoding.
+#     - pe_dropout_rate (float): Dropout rate for positional encoding.
 
-    Methods:
-    - forward(x): Forward pass of the transformer model.
+#     Methods:
+#     - forward(x): Forward pass of the transformer model.
 
-    Reference:
-    - Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., 
-    Jones, L., Gomez, A.N., Kaiser, Ł. and Polosukhin, I., 2017. 
-    Attention is all you need. Advances in neural information processing systems, 30.
-    """
+#     Reference:
+#     - Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., 
+#     Jones, L., Gomez, A.N., Kaiser, Ł. and Polosukhin, I., 2017. 
+#     Attention is all you need. Advances in neural information processing systems, 30.
+#     """
 
-    def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate, pe_max_len, pe_dropout_rate):
-        super(SimpleTransformerModel, self).__init__()
-        self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
-        self.vocab_size = vocab_size
-        self.embed = nn.Embedding(vocab_size, embed_dim)
-        transformer_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout_rate, batch_first=True)
-        self.transformer = nn.TransformerEncoder(transformer_layer, num_layers)
-        self.out = nn.Linear(embed_dim, vocab_size)
+#     def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate, pe_max_len, pe_dropout_rate):
+#         super(SimpleTransformerModel, self).__init__()
+#         self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
+#         self.vocab_size = vocab_size
+#         self.embed = nn.Embedding(vocab_size, embed_dim)
+#         transformer_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout_rate, batch_first=True)
+#         self.transformer = nn.TransformerEncoder(transformer_layer, num_layers)
+#         self.out = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, x):
-        x = self.embed(x)
-        x = self.pos_encoding(x)  # Apply positional encoding after embedding
-        x = self.transformer(x)
-        return self.out(x)
+#     def forward(self, x):
+#         x = self.embed(x)
+#         x = self.pos_encoding(x)  # Apply positional encoding after embedding
+#         x = self.transformer(x)
+#         return self.out(x)
 
-class LongformerModel(nn.Module):
-    """
-    Longformer model for processing long sequences.
+# class LongformerModel(nn.Module):
+#     """
+#     Longformer model for processing long sequences.
 
-    This class defines a Longformer model that can handle long input sequences efficiently
-    by using a combination of local and global attention mechanisms. It is based on the
-    Longformer architecture introduced by Beltagy et al. (2020).
+#     This class defines a Longformer model that can handle long input sequences efficiently
+#     by using a combination of local and global attention mechanisms. It is based on the
+#     Longformer architecture introduced by Beltagy et al. (2020).
 
-    Args:
-    - vocab_size (int): Size of the vocabulary.
-    - embed_dim (int): Dimension of the input embeddings.
-    - num_heads (int): Number of attention heads.
-    - num_layers (int): Number of Longformer layers.
-    - max_seq_length (int): Maximum sequence length.
-    - dropout_rate (float): Dropout rate for the model.
-    - pe_max_len (int): Maximum length for positional encoding.
-    - pe_dropout_rate (float): Dropout rate for positional encoding.
-    - longformer_config (LongformerConfig): Configuration object for the Longformer model.
+#     Args:
+#     - vocab_size (int): Size of the vocabulary.
+#     - embed_dim (int): Dimension of the input embeddings.
+#     - num_heads (int): Number of attention heads.
+#     - num_layers (int): Number of Longformer layers.
+#     - max_seq_length (int): Maximum sequence length.
+#     - dropout_rate (float): Dropout rate for the model.
+#     - pe_max_len (int): Maximum length for positional encoding.
+#     - pe_dropout_rate (float): Dropout rate for positional encoding.
+#     - longformer_config (LongformerConfig): Configuration object for the Longformer model.
 
-    Attributes:
-    - pos_encoding (PositionalEncoding): Positional encoding module.
-    - vocab_size (int): Size of the vocabulary.
-    - embed (nn.Embedding): Embedding layer for input tokens.
-    - longformer_layers (nn.ModuleList): List of Longformer self-attention layers.
-    - out (nn.Linear): Output linear layer for token prediction.
+#     Attributes:
+#     - pos_encoding (PositionalEncoding): Positional encoding module.
+#     - vocab_size (int): Size of the vocabulary.
+#     - embed (nn.Embedding): Embedding layer for input tokens.
+#     - longformer_layers (nn.ModuleList): List of Longformer self-attention layers.
+#     - out (nn.Linear): Output linear layer for token prediction.
 
-    Methods:
-        forward(x): Perform forward pass through the Longformer model.
+#     Methods:
+#         forward(x): Perform forward pass through the Longformer model.
 
-    References:
-        - Beltagy, I., Peters, M. E., & Cohan, A. (2020). Longformer: The Long-Document Transformer.
-          arXiv preprint arXiv:2004.05150.
-    """
+#     References:
+#         - Beltagy, I., Peters, M. E., & Cohan, A. (2020). Longformer: The Long-Document Transformer.
+#           arXiv preprint arXiv:2004.05150.
+#     """
 
-    def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length,
-                 dropout_rate, pe_max_len, pe_dropout_rate, longformer_config):
-        super(LongformerModel, self).__init__()
-        self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
-        self.vocab_size = vocab_size
-        self.embed = nn.Embedding(vocab_size, embed_dim)
+#     def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length,
+#                  dropout_rate, pe_max_len, pe_dropout_rate, longformer_config):
+#         super(LongformerModel, self).__init__()
+#         self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
+#         self.vocab_size = vocab_size
+#         self.embed = nn.Embedding(vocab_size, embed_dim)
 
-        self.longformer_layers = nn.ModuleList([
-            LongformerSelfAttention(longformer_config, layer_id=i)
-            for i in range(num_layers)
-        ])
+#         self.longformer_layers = nn.ModuleList([
+#             LongformerSelfAttention(longformer_config, layer_id=i)
+#             for i in range(num_layers)
+#         ])
 
-        self.out = nn.Linear(embed_dim, vocab_size)
+#         self.out = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, x):
-        x = self.embed(x)
-        x = self.pos_encoding(x)
+#     def forward(self, x):
+#         x = self.embed(x)
+#         x = self.pos_encoding(x)
 
-        attention_mask = torch.ones(x.size()[:-1], dtype=torch.long, device=x.device)
+#         attention_mask = torch.ones(x.size()[:-1], dtype=torch.long, device=x.device)
 
-        # Generate is_index_masked tensor
-        is_index_masked = torch.zeros_like(attention_mask, dtype=torch.bool)
+#         # Generate is_index_masked tensor
+#         is_index_masked = torch.zeros_like(attention_mask, dtype=torch.bool)
 
-        for longformer_layer in self.longformer_layers:
-            x = longformer_layer(x, attention_mask=attention_mask, is_index_masked=is_index_masked)[0]
+#         for longformer_layer in self.longformer_layers:
+#             x = longformer_layer(x, attention_mask=attention_mask, is_index_masked=is_index_masked)[0]
 
-        return self.out(x)
+#         return self.out(x)
 
 class GenomeDataset(torch.utils.data.Dataset):
     """
@@ -634,16 +642,18 @@ class GenomeDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         text = self.texts[idx]
 
-        # Pad the sequence to the nearest multiple of the attention window size (for Longformer)
-        seq_length = len(text)
         encoded = self.tokenizer.encode(text)
+
+        beginning = 0
 
         # Ensure the sequence is not longer than max_length, take random slice
         if len(encoded) >= self.max_length:
             start_index = random.randint(0, len(encoded) - self.max_length)
-            #start_index = 0
             encoded = encoded[start_index:start_index + self.max_length]
             attention_mask = torch.ones(len(encoded), dtype=torch.long)
+
+            beginning = 1 if start_index == 0 else 0
+            #print("1: Max seq: {} Length encoded: {} Length attention: {} ".format(self.max_length, len(encoded), len(attention_mask)))
         else:
             # ensure you add padding in encoded space, as token length is longer due to BPE
             len_encoded = len(encoded)
@@ -653,16 +663,18 @@ class GenomeDataset(torch.utils.data.Dataset):
             padding = "".join(["<pad>"] * (self.max_length - len_encoded))
             encoded_padding = self.tokenizer.encode(padding)
             
-            # remove first <s> and last </s> character
-            encoded_padding = encoded_padding[1:-1]
+            # remove first <s>, space and last </s> character
+            encoded_padding = encoded_padding[2:-1]
 
             encoded.extend(encoded_padding)
 
             attention_mask = torch.ones(len(encoded), dtype=torch.long)
             attention_mask[len_encoded:] = 0
+
+            beginning = 1
             #print(encoded)
-            #print(attention_mask)
-            #print("Max seq: {} Length encoded: {} Length attention: {} ".format(self.max_length, len(encoded), len(attention_mask)))
+            #print(encoded_padding)
+            #print("2: Max seq: {} Length encoded: {} Length attention: {} ".format(self.max_length, len(encoded), len(attention_mask)))
 
         #print(encoded)
         #print(attention_mask)
@@ -683,7 +695,9 @@ class GenomeDataset(torch.utils.data.Dataset):
         #     input_ids = input_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(input_ids))
         #     label_ids = label_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(label_ids))
 
-        return torch.tensor(encoded, dtype=torch.long), attention_mask
+        #print("Beginning: {}".format(beginning))
+
+        return torch.tensor(encoded, dtype=torch.long), attention_mask, beginning
 
 class EarlyStopping:
     """
@@ -722,37 +736,37 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
 
-if model_type == 'transformer':
-    model = SimpleTransformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate)
-elif model_type == 'longformer':
-    attention_window = args.longformer_attention_window
-    longformer_config = LongformerConfig(
-        hidden_size=embed_dim,
-        num_attention_heads=num_heads,
-        num_hidden_layers=num_layers,
-        attention_window=[attention_window] * num_layers,
-        intermediate_size=4 * embed_dim,
-    )
-    model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
-elif model_type == 'BARTlongformer':
+# if model_type == 'transformer':
+#     model = SimpleTransformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate)
+# elif model_type == 'longformer':
+#     attention_window = args.attention_window
+#     longformer_config = LongformerConfig(
+#         hidden_size=embed_dim,
+#         num_attention_heads=num_heads,
+#         num_hidden_layers=num_layers,
+#         attention_window=[attention_window] * num_layers,
+#         intermediate_size=4 * embed_dim,
+#     )
+#     model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
+#elif model_type == 'BARTlongformer':
     # from https://huggingface.co/docs/transformers/v4.41.3/en/model_doc/led
-    BARTlongformer_config = LEDConfig(
-        vocab_size=vocab_size,
-        d_model=embed_dim,
-        encoder_layers=num_layers,
-        decoder_layers=num_layers,
-        encoder_attention_heads=num_heads,
-        decoder_attention_heads=num_heads,
-        decoder_ffn_dim=4 * embed_dim,
-        encoder_ffn_dim=4 * embed_dim,
-        max_encoder_position_embeddings=pe_max_len,
-        max_decoder_position_embeddings=pe_max_len,
-        dropout=model_dropout_rate,
-        attention_window = args.longformer_attention_window
-    )
-    model = LEDForConditionalGeneration(BARTlongformer_config)
-else:
-    raise ValueError(f"Invalid model type: {model_type}")
+BARTlongformer_config = LEDConfig(
+    vocab_size=vocab_size,
+    d_model=embed_dim,
+    encoder_layers=num_layers,
+    decoder_layers=num_layers,
+    encoder_attention_heads=num_heads,
+    decoder_attention_heads=num_heads,
+    decoder_ffn_dim=4 * embed_dim,
+    encoder_ffn_dim=4 * embed_dim,
+    max_encoder_position_embeddings=max_seq_length,
+    max_decoder_position_embeddings=max_seq_length,
+    dropout=model_dropout_rate,
+    attention_window = args.attention_window
+)
+model = LEDForConditionalGeneration(BARTlongformer_config)
+# else:
+#     raise ValueError(f"Invalid model type: {model_type}")
 
 early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta, verbose=True)
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -760,15 +774,15 @@ print(f"Total number of trainable parameters: {total_params}", flush=True)
 
 # training dataset
 train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length)
-if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-    train_dataset.attention_window = longformer_attention_window
+#if args.model_type == "longformer" or args.model_type == "BARTlongformer":
+train_dataset.attention_window = attention_window
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 train_dataset_size = len(train_loader.dataset)
 
 # validation dataset
 val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length)
-if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-    val_dataset.attention_window = longformer_attention_window
+#if args.model_type == "longformer" or args.model_type == "BARTlongformer":
+val_dataset.attention_window = attention_window
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 val_dataset_size = len(val_loader.dataset)
 
@@ -835,8 +849,8 @@ for epoch in range(start_epoch, epochs):
 
 if len(test_genomes) > 0:
     test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length)
-    if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-        test_dataset.attention_window = longformer_attention_window
+    #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
+    test_dataset.attention_window = attention_window
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
     test_loader = tqdm(test_loader, desc="Testing", unit="batch")
