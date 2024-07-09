@@ -49,7 +49,7 @@ logging.set_verbosity_error()
 #         embed_dim (int): Dimension of the embedding layer.
 #         num_heads (int): Number of attention heads in the transformer.
 #         num_layers (int): Number of layers (stacks) in the transformer.
-#         max_seq_length (int): Maximum length of the input sequences.
+#         max_length (int): Maximum length of the input sequences.
 #         dropout_rate (float): Dropout rate in the transformer.
 
 #     The model consists of an embedding layer, positional encoding, and a transformer encoder.
@@ -61,7 +61,7 @@ logging.set_verbosity_error()
 #         embed_dim,
 #         num_heads,
 #         num_layers,
-#         max_seq_length,
+#         max_length,
 #         dropout_rate=0.5,
 #     ):
 #         super(SimpleTransformerModel, self).__init__()
@@ -108,7 +108,9 @@ def pad_blocks(input_list, block_size, pad_token="<pad>"):
 def tokenize_prompt(prompt, max_length, tokenizer):
 
     encoded = tokenizer.encode(prompt)
-    encoded, attention_mask = pad_blocks(encoded, max_length)
+    pad_token = tokenizer.encode("<pad>")[2]
+    #pprint(pad_token)
+    encoded, attention_mask = pad_blocks(encoded, max_length, pad_token=pad_token)
 
     return encoded, attention_mask
 
@@ -124,13 +126,13 @@ def print_banner():
     '''
     print(banner)
 
-def load_model(model_path, embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window):
+def load_model(model_path, embed_dim, num_heads, num_layers, max_length, device, vocab_size, attention_window):
     # Infer the vocab size from the model checkpoint
     checkpoint = torch.load(model_path, map_location=device)
     #vocab_size = checkpoint['model_state_dict']['embed.weight'].size(0)
 
     # if model_type == 'transformer':
-    #     model = SimpleTransformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length)
+    #     model = SimpleTransformerModel(vocab_size, embed_dim, num_heads, num_layers, max_length)
     # elif model_type == 'reformer':
     #     model = SimpleReformerModel(vocab_size, embed_dim, reformer_depth, reformer_buckets, reformer_hashes)
     # elif model_type == "BARTlongformer":
@@ -143,8 +145,8 @@ def load_model(model_path, embed_dim, num_heads, num_layers, max_seq_length, dev
         decoder_attention_heads=num_heads,
         decoder_ffn_dim=4 * embed_dim,
         encoder_ffn_dim=4 * embed_dim,
-        max_encoder_position_embeddings=max_seq_length,
-        max_decoder_position_embeddings=max_seq_length,
+        max_encoder_position_embeddings=max_length,
+        max_decoder_position_embeddings=max_length,
         attention_window = attention_window
     )
     model = LEDForConditionalGeneration(BARTlongformer_config)
@@ -203,11 +205,15 @@ def predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device
         mask = attention_mask[index].to(device)
     
         # ensure all tokens attend globally just to first token if first entry
-        global_attention_mask = torch.zeros(entry.shape, dtype=torch.long, device=input_ids.device)
+        global_attention_mask = torch.zeros(entry.shape, dtype=torch.long, device=entry.device)
         if index == 0:
             global_attention_mask[:,[0]] = 1
         
-        summary_ids = model.generate(entry, global_attention_mask=global_attention_mask, attention_mask=attention_mask, max_length=len(entry), temperature=temperature, do_sample=True)[0].tolist()
+        #print(entry)
+        #print(mask)
+        #print(global_attention_mask)
+
+        summary_ids = model.generate(entry, global_attention_mask=global_attention_mask, attention_mask=mask, max_length=len(entry[0]), temperature=temperature, do_sample=True)[0].tolist()
         decoded = tokenizer.decode(summary_ids, skip_special_tokens=True)
         output += decoded
 
@@ -232,7 +238,7 @@ def main():
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
     parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
-    parser.add_argument("--max_seq_length", type=int, default=256, help="Maximum sequence length.")
+    parser.add_argument("--max_length", type=int, default=256, help="Maximum sequence length.")
     parser.add_argument("--device", type=str, default='cpu', help="Device to run the model on (e.g., 'cpu' or 'cuda').")
     #parser.add_argument("--max_len", type=int, default=5000, help="Maximum length for positional encoding.")
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
@@ -244,9 +250,9 @@ def main():
     parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
     args = parser.parse_args()
 
-    args.max_seq_length = max(args.max_seq_length, args.attention_window)
-    # Round down max_seq_length to the nearest multiple of attention_window
-    args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
+    args.max_length = max(args.max_length, args.attention_window)
+    # Round down max_length to the nearest multiple of attention_window
+    args.max_length = (args.max_length // args.attention_window) * args.attention_window
 
     device = torch.device(args.device)
 
@@ -257,7 +263,7 @@ def main():
     vocab_size = tokenizer.vocab_size
 
     model = load_model(args.model_path, args.embed_dim, args.num_heads, args.num_layers,
-                        args.max_seq_length, device, vocab_size, args.attention_window)
+                        args.max_length, device, vocab_size, args.attention_window)
     #if args.model_type == 'transformer':
     #    model.pos_encoding.pe = model.pos_encoding.pe[:args.max_len, :].to(device)  # Adjust the positional encoding based on max_len and device
 
@@ -269,9 +275,10 @@ def main():
             if prop_masked > 0:
                 prompt = mask_integers(prompt, prop_masked)
 
-            tokens, attention_mask = tokenize_prompt(prompt, args.max_seq_length, tokenizer)
+            tokens, attention_mask = tokenize_prompt(prompt, args.max_length, tokenizer)
 
             #tokens = tokenizer.encode(prompt)
+            #print(tokens)
             input_ids = [torch.tensor([input]) for input in tokens]
             attention_mask = [torch.tensor([input], dtype=torch.long) for input in attention_mask]
             
