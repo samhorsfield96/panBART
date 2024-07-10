@@ -21,6 +21,7 @@ from tqdm import tqdm
 from transformers import LongformerConfig, LongformerSelfAttention, LEDConfig, LEDForConditionalGeneration, LEDTokenizer
 from pathlib import Path
 import random
+import re
 
 # Global variables
 PROGRAM_NAME = "panGPT"
@@ -65,6 +66,43 @@ def print_banner():
 
 print_banner()
 
+def mask_integers(string, prop_masked):   
+   
+    # Randomly select indices to mask
+    if prop_masked > 0:
+        # Identify the indices of the integers in the list
+        integer_indices = np.array(string.split())
+        
+        # Determine how many integers to mask
+        num_to_mask = int(len(integer_indices) * prop_masked)
+
+        # sample number sites from poisson
+        num_to_mask = np.random.poisson(num_to_mask)
+        indices_to_mask = np.random.choice(range(len(integer_indices)), size=num_to_mask, replace=False)
+
+        # Replace selected indices with "[MASK]"
+        integer_indices[indices_to_mask] = "<mask>"
+
+        # Reconstruct the string
+        masked_string = ' '.join(integer_indices.tolist())
+
+        return masked_string
+    else:
+        return string    
+
+def pad_input(input, max_length, tokenizer):
+
+    len_masked = len(input)
+    padding = "".join(["<pad>"] * (max_length - len_masked))
+    encoded_padding = tokenizer.encode(padding)
+    
+    # remove first <s>, space and last </s> character
+    encoded_padding = encoded_padding[2:-1]
+
+    input.extend(encoded_padding)
+
+    return input
+
 # Command line argument parsing
 def parse_args():
     """
@@ -100,6 +138,7 @@ def parse_args():
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
     parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
+    parser.add_argument("--prop_masked", type=float, default=0.5, help="Average proportion of inputs to be masked. Default = 0.5")
     
     args = parser.parse_args()
 
@@ -144,6 +183,7 @@ seed = args.seed
 #pe_max_len = args.pe_max_len
 pe_dropout_rate = args.pe_dropout_rate
 log_dir = args.log_dir
+prop_masked = args.prop_masked
 
 # Check if max_seq_length is a multiple of attention_window when using Longformer
 #if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % attention_window != 0:
@@ -334,22 +374,22 @@ def train_model(train_loader, model, optimizer, criterion, device):
 
     model.train()  # Set the model to training mode
     total_train_loss = 0
-    for i, (input_ids, attention_mask, beginning) in enumerate(train_loader):  # Added enumeration for clarity
-        input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)  # Move data to the appropriate device
+    for i, (decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, beginning) in enumerate(train_loader):  # Added enumeration for clarity
+        decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), labels.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
         
         beginning = torch.nonzero(beginning)
 
         # set global attention for all tokens so that all positions attend to all others.
-        global_attention_mask = torch.zeros(input_ids.shape, dtype=torch.long, device=input_ids.device)
+        global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
         global_attention_mask[beginning,[0]] = 1
         
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids, global_attention_mask=global_attention_mask, attention_mask=attention_mask).logits  # Generate predictions
-        loss = criterion(outputs.view(-1, model.config.vocab_size), input_ids.view(-1))
+        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+        loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
 
-        total_train_loss += loss.item() * input_ids.size(0)  # Accumulate the loss
+        total_train_loss += loss.item() * decoder_input.size(0)  # Accumulate the loss
         # Update the progress bar
         train_loader.set_description(f"Epoch {epoch} - Training")
         train_loader.update(1)
@@ -408,26 +448,26 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
     preds_all = []
     labels_all = []
     with torch.no_grad():
-        for inputs, attention_mask, beginning in val_loader:  # Correctly unpack the tuples returned by the DataLoader
-            inputs, attention_mask = inputs.to(device), attention_mask.to(device)  # Move data to the appropriate device
+        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, beginning in val_loader:  # Correctly unpack the tuples returned by the DataLoader
+            decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), labels.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
 
             beginning = torch.nonzero(beginning)
 
             global_attention_mask = torch.zeros(inputs.shape, dtype=torch.long, device=inputs.device)
             global_attention_mask[beginning,[0]] = 1
 
-            outputs = model(inputs, attention_mask=attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions from the model
-            loss = criterion(outputs.view(-1, model.config.vocab_size), inputs.view(-1))
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+            loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
             total_val_loss += loss.item() * inputs.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
-            correct = (preds == inputs).sum().item()
-            accuracy = correct / inputs.numel()
-            total_accuracy += accuracy * inputs.size(0)  # Accumulate the accuracy
+            correct = (preds == labels).sum().item()
+            accuracy = correct / labels.numel()
+            total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
 
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
-            labels_all.extend(inputs.view(-1).tolist())
+            labels_all.extend(labels.view(-1).tolist())
             # Update the progress bar
             if epoch is None:
                 val_loader.set_description("Testing")
@@ -444,7 +484,6 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
     kappa = cohen_kappa_score(labels_all, preds_all)
 
     return avg_val_loss, avg_val_accuracy, precision, recall, f1, kappa
-
 
 genomes = load_dataset(input_file)
 unique_tokens = set(token for genome in genomes for token in genome.split())
@@ -631,73 +670,79 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length):
+    def __init__(self, texts, tokenizer, max_length, prop_masked):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
+        self.prop_masked = prop_masked
+        self.mask_token = str(self.tokenizer.encode("<mask>")[1])
 
     def __len__(self):
         return len(self.texts)
 
     def __getitem__(self, idx):
         text = self.texts[idx]
+        text_masked = mask_integers(text, self.prop_masked)
+        #print("after masking")
+        #print(text_masked)
 
-        encoded = self.tokenizer.encode(text)
+        input = self.tokenizer.encode(text)
+        masked_input = self.tokenizer.encode(text_masked)
 
         beginning = 0
 
+        # ensure you don't attend to <mask>, set 0 in attention_mask
         # Ensure the sequence is not longer than max_length, take random slice
-        if len(encoded) >= self.max_length:
-            start_index = random.randint(0, len(encoded) - self.max_length)
-            encoded = encoded[start_index:start_index + self.max_length]
-            attention_mask = torch.ones(len(encoded), dtype=torch.long)
+        if len(input) >= self.max_length:
+            # start at random point in sequence
+            start_index = random.randint(0, len(input) - self.max_length)
 
+            decoder_input = input[start_index:start_index + self.max_length - 1]
+            labels = input[start_index + 1:start_index + self.max_length]
+            encoder_input = masked_input[start_index + 1:start_index + self.max_length]
             beginning = 1 if start_index == 0 else 0
-            #print("1: Max seq: {} Length encoded: {} Length attention: {} ".format(self.max_length, len(encoded), len(attention_mask)))
         else:
-            # ensure you add padding in encoded space, as token length is longer due to BPE
-            len_encoded = len(encoded)
-            
-            #padded_length = ((seq_length + self.attention_window - 1) // self.attention_window) * self.attention_window
-
-            padding = "".join(["<pad>"] * (self.max_length - len_encoded))
-            encoded_padding = self.tokenizer.encode(padding)
-            
-            # remove first <s>, space and last </s> character
-            encoded_padding = encoded_padding[2:-1]
-
-            encoded.extend(encoded_padding)
-
-            attention_mask = torch.ones(len(encoded), dtype=torch.long)
-            attention_mask[len_encoded:] = 0
-
+            # generate decoder and labels input
+            decoder_input = input[:-1]
+            labels = input[1:]
+            encoder_input = masked_input[1:]
             beginning = 1
-            #print(encoded)
-            #print(encoded_padding)
-            #print("2: Max seq: {} Length encoded: {} Length attention: {} ".format(self.max_length, len(encoded), len(attention_mask)))
 
-        #print(encoded)
-        #print(attention_mask)
-        
-        # Input is all but the last token
-        #input_ids = encoded[:-1]
-        # Labels are all but the first token, shifted by one
-        #label_ids = encoded[1:]
+        len_decoder = len(decoder_input)
+        decoder_input = pad_input(decoder_input, self.max_length, tokenizer)
 
-        # Pad the sequence to the nearest multiple of the attention window size (for Longformer)
-        # if hasattr(self, 'attention_window'):
-        #     seq_length = len(input_ids)
-        #     padded_length = ((seq_length + self.attention_window - 1) // self.attention_window) * self.attention_window
-        #     input_ids = input_ids + [self.tokenizer.token_to_id("<pad>")] * (padded_length - seq_length)
-        #     label_ids = label_ids + [self.tokenizer.token_to_id("<pad>")] * (padded_length - seq_length)
-        # else:
-        #     # Pad the sequence to max_length (for transformer)
-        #     input_ids = input_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(input_ids))
-        #     label_ids = label_ids + [self.tokenizer.token_to_id("<pad>")] * (self.max_length - 1 - len(label_ids))
+        decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
+        decoder_attention_mask[len_decoder:] = 0
 
-        #print("Beginning: {}".format(beginning))
+        labels = pad_input(labels, self.max_length, tokenizer)
 
-        return torch.tensor(encoded, dtype=torch.long), attention_mask, beginning
+        # merge consecutive masks into single mask token
+        encoder_input = ' '.join([str(i) for i in encoder_input])
+        #print('encoder_input pre merging')
+        #print(encoder_input)
+        pattern = f'({self.mask_token} )+'
+        encoder_input = re.sub(pattern, self.mask_token + ' ', encoder_input)
+        pattern = f'( {self.mask_token})+'
+        encoder_input = re.sub(pattern, ' ' + self.mask_token, encoder_input)
+        #print('encoder_input post merging')
+        #print(encoder_input)
+        encoder_input = [int(i) for i in encoder_input.split()]
+
+        len_masked = len(encoder_input)
+        encoder_input = pad_input(encoder_input, self.max_length, tokenizer)
+
+        #print('encoder_input post padding')
+        #print(encoder_input)
+
+        # do not attend to mask tokens
+        #print(int(self.mask_token))
+        mask_idx = np.flatnonzero(np.array(encoder_input) == int(self.mask_token))
+
+        encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
+        encoder_attention_mask[len_masked:] = 0
+        encoder_attention_mask[mask_idx] = 0
+
+        return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
 
 class EarlyStopping:
     """
@@ -773,14 +818,14 @@ total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total number of trainable parameters: {total_params}", flush=True)
 
 # training dataset
-train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length)
+train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked)
 #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
 train_dataset.attention_window = attention_window
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 train_dataset_size = len(train_loader.dataset)
 
 # validation dataset
-val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length)
+val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked)
 #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
 val_dataset.attention_window = attention_window
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -848,7 +893,7 @@ for epoch in range(start_epoch, epochs):
     writer.close()
 
 if len(test_genomes) > 0:
-    test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length)
+    test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked)
     #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
     test_dataset.attention_window = attention_window
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
