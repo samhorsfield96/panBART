@@ -18,7 +18,7 @@ import warnings
 import random
 import numpy as np
 from tqdm import tqdm
-from transformers import LongformerConfig, LongformerSelfAttention, LEDConfig, LEDForConditionalGeneration, LEDTokenizer
+from transformers import LEDConfig, LEDForConditionalGeneration, LEDTokenizer
 from pathlib import Path
 import random
 import re
@@ -90,16 +90,19 @@ def mask_integers(string, prop_masked):
     else:
         return string    
 
-def pad_input(input, max_length, tokenizer):
+def pad_input(input, max_length, tokenizer, labels=False):
 
     len_masked = len(input)
-    padding = "".join(["<pad>"] * (max_length - len_masked))
-    encoded_padding = tokenizer.encode(padding)
-    
-    # remove first <s>, space and last </s> character
-    encoded_padding = encoded_padding[2:-1]
+    if labels == False:
+        padding = "".join(["<pad>"] * (max_length - len_masked))
+        encoded_padding = tokenizer.encode(padding)
+        
+        # remove first <s>, space and last </s> character
+        encoded_padding = encoded_padding[2:-1]
 
-    input.extend(encoded_padding)
+        input.extend(encoded_padding)
+    else:
+        input.extend([-100] * (max_length - len_masked))
 
     return input
 
@@ -453,12 +456,12 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
 
             beginning = torch.nonzero(beginning)
 
-            global_attention_mask = torch.zeros(inputs.shape, dtype=torch.long, device=inputs.device)
+            global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
             global_attention_mask[beginning,[0]] = 1
 
             outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
             loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
-            total_val_loss += loss.item() * inputs.size(0)  # Accumulate the loss
+            total_val_loss += loss.item() * decoder_input.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
             correct = (preds == labels).sum().item()
@@ -682,12 +685,8 @@ class GenomeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         text = self.texts[idx]
-        text_masked = mask_integers(text, self.prop_masked)
-        #print("after masking")
-        #print(text_masked)
 
         input = self.tokenizer.encode(text)
-        masked_input = self.tokenizer.encode(text_masked)
 
         beginning = 0
 
@@ -699,13 +698,30 @@ class GenomeDataset(torch.utils.data.Dataset):
 
             decoder_input = input[start_index:start_index + self.max_length - 1]
             labels = input[start_index + 1:start_index + self.max_length]
-            encoder_input = masked_input[start_index + 1:start_index + self.max_length]
+
+            # decode to get input string, then mask and re-encode to ensure same string is learned from in decoder and encoder
+            # mask will remove characters, so indexes do not map between decoder_input and encoder_input
+            text = tokenizer.decode(labels, skip_special_tokens=True)
+            #print("pre-masking")
+            #print(text)
+            text_masked = mask_integers(text, self.prop_masked)
+            #print("after masking")
+            #print(text_masked)
+
+            # encode, removing </s> token if not at end of genome
+            if start_index == (len(input) - self.max_length - 1):
+                encoder_input = self.tokenizer.encode(text_masked)[1:]
+            else:
+                encoder_input = self.tokenizer.encode(text_masked)[1:-1]
+
             beginning = 1 if start_index == 0 else 0
         else:
             # generate decoder and labels input
             decoder_input = input[:-1]
             labels = input[1:]
-            encoder_input = masked_input[1:]
+            text_masked = mask_integers(text, self.prop_masked)
+            encoder_input = self.tokenizer.encode(text_masked)
+            encoder_input = encoder_input[1:]
             beginning = 1
 
         len_decoder = len(decoder_input)
@@ -714,7 +730,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
         decoder_attention_mask[len_decoder:] = 0
 
-        labels = pad_input(labels, self.max_length, tokenizer)
+        labels = pad_input(labels, self.max_length, tokenizer, labels=True)
 
         # merge consecutive masks into single mask token
         encoder_input = ' '.join([str(i) for i in encoder_input])
@@ -741,6 +757,19 @@ class GenomeDataset(torch.utils.data.Dataset):
         encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
         encoder_attention_mask[len_masked:] = 0
         encoder_attention_mask[mask_idx] = 0
+
+        #print("decoder_input")
+        #print(decoder_input)
+        #print("encoder_input")
+        #print(encoder_input)
+        #print("encoder_attention_mask")
+        #print(encoder_attention_mask.tolist())
+        #print("decoder_input")
+        #print(decoder_input)
+        #print("decoder_attention_mask")
+        #print(decoder_attention_mask.tolist())
+        #print("labels")
+        #print(labels)
 
         return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
 
