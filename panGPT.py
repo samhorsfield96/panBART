@@ -320,7 +320,7 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart):
         return 0, False
     try:
         if restart:
-            print("Restarting training from scratch.")
+            print("Restarting training.")
             return 0, False
         checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -751,11 +751,11 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         # do not attend to mask tokens
         #print(int(self.mask_token))
-        mask_idx = np.flatnonzero(np.array(encoder_input) == int(self.mask_token))
+        #mask_idx = np.flatnonzero(np.array(encoder_input) == int(self.mask_token))
 
         encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
         encoder_attention_mask[len_masked:] = 0
-        encoder_attention_mask[mask_idx] = 0
+        #encoder_attention_mask[mask_idx] = 0
 
         #print("decoder_input")
         #print(decoder_input)
@@ -909,7 +909,6 @@ for epoch in range(start_epoch, epochs):
     writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
 
     lr_scheduler.step(avg_val_loss)
-    print(lr_scheduler.get_last_lr())
     early_stopping(avg_val_loss)
     if early_stopping.early_stop:
         print("Early stopping triggered.", flush=True)
