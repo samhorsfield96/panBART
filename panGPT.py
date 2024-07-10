@@ -137,19 +137,14 @@ def parse_args():
     parser.add_argument("--train_size", type=float, default=0.8, help="Proportion of the dataset to include in the training set")
     parser.add_argument("--val_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    #parser.add_argument("--pe_max_len", type=int, default=12800, help="Maximum length for positional encoding")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
     parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
     parser.add_argument("--prop_masked", type=float, default=0.5, help="Average proportion of inputs to be masked. Default = 0.5")
+    parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
     
     args = parser.parse_args()
 
-    # Ensure pe_max_len is greater than or equal to max_seq_length
-    #if args.pe_max_len < args.max_seq_length:
-    #    raise ValueError(f"Error: pe_max_len ({args.pe_max_len}) must be greater than or equal to max_seq_length ({args.max_seq_length}).")
-
-    #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
     # Ensure max_seq_length is greater than or equal to attention_window
     args.max_seq_length = max(args.max_seq_length, args.attention_window)
     # Round down max_seq_length to the nearest multiple of attention_window
@@ -187,6 +182,7 @@ seed = args.seed
 pe_dropout_rate = args.pe_dropout_rate
 log_dir = args.log_dir
 prop_masked = args.prop_masked
+restart = args.restart
 
 # Check if max_seq_length is a multiple of attention_window when using Longformer
 #if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % attention_window != 0:
@@ -291,6 +287,8 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     """
 
     try:
+        for key in model.state_dict().keys():
+            print(key)
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
@@ -301,7 +299,7 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     except IOError as e:
         print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, checkpoint_path):
+def load_checkpoint(model, optimizer, checkpoint_path, restart):
     """
     Load a model checkpoint from a file.
 
@@ -323,10 +321,10 @@ def load_checkpoint(model, optimizer, checkpoint_path):
         print("No checkpoint found. Starting from scratch.")
         return 0, False
     try:
-        checkpoint = torch.load(checkpoint_path)
-        if not _is_compatible_checkpoint(model, checkpoint):
-            print("Checkpoint incompatible. Starting from scratch.")
+        if restart:
+            print("Restarting training from scratch.")
             return 0, False
+        checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -339,23 +337,6 @@ def load_checkpoint(model, optimizer, checkpoint_path):
             error_msg = f"Error loading checkpoint from '{checkpoint_path}': {str(e)}"
         logging.error(error_msg)
         return 0, False
-
-def _is_compatible_checkpoint(model, checkpoint):
-    """
-    Check if a model checkpoint is compatible with the current model.
-
-    Args:
-    - model: The PyTorch model.
-    - checkpoint (dict): The model checkpoint.
-
-    Returns:
-    - bool: True if the checkpoint is compatible, False otherwise.
-
-    This function checks if a model checkpoint is compatible with the current model
-    by comparing the vocabulary sizes of the model and the checkpoint.
-    """
-
-    return model.config.vocab_size == checkpoint["model_state_dict"]["embed.weight"].size(0)
 
 def train_model(train_loader, model, optimizer, criterion, device):
     """
@@ -378,7 +359,7 @@ def train_model(train_loader, model, optimizer, criterion, device):
     model.train()  # Set the model to training mode
     total_train_loss = 0
     for i, (decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, beginning) in enumerate(train_loader):  # Added enumeration for clarity
-        decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), labels.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
+        decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
         
         beginning = torch.nonzero(beginning)
 
@@ -388,11 +369,21 @@ def train_model(train_loader, model, optimizer, criterion, device):
         
         optimizer.zero_grad()  # Clear gradients before calculating them
         outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+        
+        # Free GPU memory
+        del encoder_input
+        del encoder_attention_mask
+        del decoder_input
+        del decoder_attention_mask
+        del global_attention_mask
+
+        labels = labels.to(device)
+        
         loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
 
-        total_train_loss += loss.item() * decoder_input.size(0)  # Accumulate the loss
+        total_train_loss += loss.item() * labels.size(0)  # Accumulate the loss
         # Update the progress bar
         train_loader.set_description(f"Epoch {epoch} - Training")
         train_loader.update(1)
@@ -452,7 +443,7 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
     labels_all = []
     with torch.no_grad():
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, beginning in val_loader:  # Correctly unpack the tuples returned by the DataLoader
-            decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), labels.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
+            decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
 
             beginning = torch.nonzero(beginning)
 
@@ -460,8 +451,18 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
             global_attention_mask[beginning,[0]] = 1
 
             outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+            
+            # Free GPU memory
+            del encoder_input
+            del encoder_attention_mask
+            del decoder_input
+            del decoder_attention_mask
+            del global_attention_mask
+
+            labels = labels.to(device)
+            
             loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
-            total_val_loss += loss.item() * decoder_input.size(0)  # Accumulate the loss
+            total_val_loss += loss.item() * labels.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
             correct = (preds == labels).sum().item()
@@ -861,7 +862,7 @@ val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 val_dataset_size = len(val_loader.dataset)
 
 criterion = torch.nn.CrossEntropyLoss() # what are we trying to optimize?
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
 lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience, verbose=True) # taking big, then small steps
 
 if torch.cuda.is_available():
@@ -874,7 +875,7 @@ else:
 logging.info(f"device = {device}")
 model.to(device)
 
-start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path)
+start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart)
 
 if is_checkpoint_loaded:
     logging.info("Continuing training from the loaded checkpoint.")
