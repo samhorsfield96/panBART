@@ -861,7 +861,7 @@ val_dataset_size = len(val_loader.dataset)
 
 criterion = torch.nn.CrossEntropyLoss() # what are we trying to optimize?
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
-lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience, verbose=True) # taking big, then small steps
+lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
 
 if torch.cuda.is_available():
     print("GPU available, using cuda, device: {}".format(str(args.device)))
@@ -909,6 +909,7 @@ for epoch in range(start_epoch, epochs):
     writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
 
     lr_scheduler.step(avg_val_loss)
+    print(lr_scheduler.get_last_lr())
     early_stopping(avg_val_loss)
     if early_stopping.early_stop:
         print("Early stopping triggered.", flush=True)
