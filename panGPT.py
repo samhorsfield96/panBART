@@ -128,7 +128,7 @@ def parse_args():
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.5, help="Factor by which the learning rate will be reduced by the learning rate scheduler")
     parser.add_argument("--lr_patience", type=int, default=10, help="Patience for learning rate reduction")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for the optimizer")
-    parser.add_argument("--early_stop_patience", type=int, default=20, help="Patience for early stopping")
+    parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--min_delta", type=float, default=0.01, help="Minimum delta for early stopping")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--max_vocab_size", type=int, default=70000, help="Maximum vocabulary size. Tokens beyond this size will be mapped to <UNK>.")
@@ -287,8 +287,6 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     """
 
     try:
-        for key in model.state_dict().keys():
-            print(key)
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
