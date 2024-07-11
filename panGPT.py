@@ -6,6 +6,8 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import psutil
 import gc
 from sklearn.model_selection import train_test_split
@@ -36,6 +38,14 @@ logging.basicConfig(
         logging.StreamHandler()
     ],
 )
+
+# DDP setup
+def setup(rank, world_size):
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 def print_banner():
     """
@@ -330,7 +340,7 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart):
         logging.error(error_msg)
         return 0, False
 
-def train_model(train_loader, model, optimizer, criterion, device):
+def train_model(train_loader, model, optimizer, criterion, device, vocab_size):
     """
     Train the transformer model on the training dataset.
 
@@ -371,7 +381,7 @@ def train_model(train_loader, model, optimizer, criterion, device):
 
         labels = labels.to(device)
         
-        loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
+        loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
 
@@ -409,7 +419,7 @@ def calculate_metrics(preds, labels):
     kappa = cohen_kappa_score(labels.cpu().numpy(), preds.cpu().numpy())
     return accuracy, precision, recall, f1, kappa
 
-def validate_model(val_loader, model, criterion, device, epoch=None):
+def validate_model(val_loader, model, criterion, device, vocab_size, epoch=None):
     """
     Validate the transformer model on the validation dataset.
 
@@ -453,7 +463,7 @@ def validate_model(val_loader, model, criterion, device, epoch=None):
 
             labels = labels.to(device)
             
-            loss = criterion(outputs.view(-1, model.config.vocab_size), labels.view(-1))
+            loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
             total_val_loss += loss.item() * labels.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
@@ -842,33 +852,37 @@ early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total number of trainable parameters: {total_params}", flush=True)
 
+# determine number of GPUs to use
+num_gpus = torch.cuda.device_count()
+num_workers = 1 if num_gpus == 0 else num_gpus
+if num_gpus > 0:
+    print("{} GPU(s) available, using cuda".format(num_gpus))
+
+    device = torch.device("cuda") # Run on a GPU if one is available
+else:
+    print("GPU not available, using cpu.")
+    device = torch.device("cpu")
+logging.info(f"device = {device}")
+model = nn.DataParallel(model, device_ids=[i for i in range(num_gpus)])
+model.to(device)
+
 # training dataset
 train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked)
 #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
 train_dataset.attention_window = attention_window
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
 train_dataset_size = len(train_loader.dataset)
 
 # validation dataset
 val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked)
 #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
 val_dataset.attention_window = attention_window
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 val_dataset_size = len(val_loader.dataset)
 
 criterion = torch.nn.CrossEntropyLoss() # what are we trying to optimize?
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
 lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
-
-if torch.cuda.is_available():
-    print("GPU available, using cuda, device: {}".format(str(args.device)))
-
-    device = torch.device("cuda:" + str(args.device)) # Run on a GPU if one is available
-else:
-    print("GPU not available, using cpu.")
-    device = torch.device("cpu")
-logging.info(f"device = {device}")
-model.to(device)
 
 start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart)
 
@@ -883,7 +897,7 @@ for epoch in range(start_epoch, epochs):
     writer = SummaryWriter(log_dir=log_dir)
     # Training model loop
     train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
-    avg_train_loss = train_model(train_loader, model, optimizer, criterion, device)
+    avg_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size)
     train_perplexity = torch.exp(torch.tensor(avg_train_loss))
     # Log training metrics
     logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
@@ -892,7 +906,7 @@ for epoch in range(start_epoch, epochs):
 
     # Validate model loop
     val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
-    avg_val_loss, val_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, epoch)
+    avg_val_loss, val_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, epoch)
     val_perplexity = torch.exp(torch.tensor(avg_val_loss))
     # Log validation metrics
     logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
@@ -921,11 +935,11 @@ if len(test_genomes) > 0:
     test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked)
     #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
     test_dataset.attention_window = attention_window
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
     test_loader = tqdm(test_loader, desc="Testing", unit="batch")
     # Test Model Loop
-    test_loss, test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device)
+    test_loss, test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, vocab_size, device)
     test_perplexity = torch.exp(torch.tensor(test_loss))
     # Log test metrics
     logging.info(f'Test Loss: {test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}, Kappa: {test_kappa}')
