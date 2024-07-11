@@ -148,8 +148,8 @@ def predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device
         if batch_index == 0:
             global_attention_mask[0, 0] = 1
         
-        print(batch_attention_mask)
-        print(batch_input_ids)
+        #print(batch_attention_mask)
+        #print(batch_input_ids)
 
         # Generate summaries for the current batch
         summary_ids = model.generate(
