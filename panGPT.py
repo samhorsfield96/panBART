@@ -320,7 +320,7 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart):
         return 0, False
     try:
         if restart:
-            print("Restarting training.")
+            print("Restarting training, overwriting existing checkpoint.")
             return 0, False
         checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -695,9 +695,11 @@ class GenomeDataset(torch.utils.data.Dataset):
             # start at random point in sequence
             start_index = random.randint(0, len(input) - self.max_length)
 
-            decoder_input = input[start_index:start_index + self.max_length - 1]
-            labels = input[start_index + 1:start_index + self.max_length]
-
+            labels = input[start_index:start_index + self.max_length]
+            # wrap decoder input to right
+            decoder_input = [labels[-1]]
+            decoder_input.extend(labels[:-1])
+            
             # decode to get input string, then mask and re-encode to ensure same string is learned from in decoder and encoder
             # mask will remove characters, so indexes do not map between decoder_input and encoder_input
             text = tokenizer.decode(labels, skip_special_tokens=True)
@@ -707,20 +709,23 @@ class GenomeDataset(torch.utils.data.Dataset):
             #print("after masking")
             #print(text_masked)
 
-            # encode, removing </s> token if not at end of genome
+            # encode, removing <s> and </s> token if not at end of genome
             if start_index == (len(input) - self.max_length - 1):
-                encoder_input = self.tokenizer.encode(text_masked)[1:]
+                encoder_input = self.tokenizer.encode(text_masked)
+            elif start_index == 0:
+                encoder_input = self.tokenizer.encode(text_masked)[:-1]
             else:
                 encoder_input = self.tokenizer.encode(text_masked)[1:-1]
 
             beginning = 1 if start_index == 0 else 0
         else:
-            # generate decoder and labels input
-            decoder_input = input[:-1]
-            labels = input[1:]
+            # generate decoder and labels input, wrapping decoder input to right
+            labels = input
+            decoder_input = [labels[-1]]
+            decoder_input.extend(labels[:-1])
+            
             text_masked = mask_integers(text, self.prop_masked)
             encoder_input = self.tokenizer.encode(text_masked)
-            encoder_input = encoder_input[1:]
             beginning = 1
 
         len_decoder = len(decoder_input)
@@ -757,18 +762,16 @@ class GenomeDataset(torch.utils.data.Dataset):
         encoder_attention_mask[len_masked:] = 0
         #encoder_attention_mask[mask_idx] = 0
 
-        #print("decoder_input")
-        #print(decoder_input)
-        #print("encoder_input")
-        #print(encoder_input)
-        #print("encoder_attention_mask")
-        #print(encoder_attention_mask.tolist())
+        #print("labels")
+        #print(labels)
         #print("decoder_input")
         #print(decoder_input)
         #print("decoder_attention_mask")
         #print(decoder_attention_mask.tolist())
-        #print("labels")
-        #print(labels)
+        #print("encoder_input")
+        #print(encoder_input)
+        #print("encoder_attention_mask")
+        #print(encoder_attention_mask.tolist())
 
         return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
 
