@@ -94,13 +94,7 @@ def pad_input(input, max_length, tokenizer, labels=False):
 
     len_masked = len(input)
     if labels == False:
-        padding = "".join(["<pad>"] * (max_length - len_masked))
-        encoded_padding = tokenizer.encode(padding)
-        
-        # remove first <s>, space and last </s> character
-        encoded_padding = encoded_padding[2:-1]
-
-        input.extend(encoded_padding)
+        input.extend([tokenizer.pad_token_id] * (max_length - len_masked))
     else:
         input.extend([-100] * (max_length - len_masked))
 
@@ -140,7 +134,7 @@ def parse_args():
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
     parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
-    parser.add_argument("--prop_masked", type=float, default=0.5, help="Average proportion of inputs to be masked. Default = 0.5")
+    parser.add_argument("--prop_masked", type=float, default=0.3, help="Average proportion of inputs to be masked. Default = 0.3")
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
     
     args = parser.parse_args()
@@ -677,7 +671,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         self.texts = texts
         self.max_length = max_length
         self.prop_masked = prop_masked
-        self.mask_token = str(self.tokenizer.encode("<mask>")[1])
+        self.mask_token = self.tokenizer.mask_token_id
 
     def __len__(self):
         return len(self.texts)
@@ -741,9 +735,9 @@ class GenomeDataset(torch.utils.data.Dataset):
         #print('encoder_input pre merging')
         #print(encoder_input)
         pattern = f'({self.mask_token} )+'
-        encoder_input = re.sub(pattern, self.mask_token + ' ', encoder_input)
+        encoder_input = re.sub(pattern, str(self.mask_token) + ' ', encoder_input)
         pattern = f'( {self.mask_token})+'
-        encoder_input = re.sub(pattern, ' ' + self.mask_token, encoder_input)
+        encoder_input = re.sub(pattern, ' ' + str(self.mask_token), encoder_input)
         #print('encoder_input post merging')
         #print(encoder_input)
         encoder_input = [int(i) for i in encoder_input.split()]
