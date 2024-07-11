@@ -143,9 +143,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
-    parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
+    #parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
+    parser.add_argument("--num_workers", type=int, default=1, help="Number of threads for data loading. Default = 1")
     parser.add_argument("--prop_masked", type=float, default=0.3, help="Average proportion of inputs to be masked. Default = 0.3")
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
+    parser.add_argument("--reuse_tokenizer", default=False, action="store_true", help="Reuse existing tokenizer if present.")
     
     args = parser.parse_args()
 
@@ -506,12 +508,12 @@ logging.info(
     f"Sequence lengths - Min: {min_sequence_length}, Max: {max_sequence_length}, Avg: {avg_sequence_length:.2f}"
 )
 
-
-#tokenizer = ByteLevelBPETokenizer()
-#tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
-#tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=["<s>","<pad>", "</s>","<unk>", "<mask>",])
-#Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
-#tokenizer.save_model(tokenizer_dir)
+if not args.reuse_tokenizer:
+    tokenizer = ByteLevelBPETokenizer()
+    tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
+    tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=["<s>","<pad>", "</s>","<unk>", "<mask>",])
+    Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
+    tokenizer.save_model(tokenizer_dir)
 tokenizer = LEDTokenizer.from_pretrained(tokenizer_dir, add_prefix_space=True)
 vocab_size = tokenizer.vocab_size
 
@@ -557,108 +559,6 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[: x.size(0), :]
         return self.dropout(x)
-
-# class SimpleTransformerModel(nn.Module):
-#     """
-#     Simple transformer model for genomic data.
-
-#     This class defines a simple transformer model architecture for processing genomic data.
-
-#     Args:
-#     - vocab_size (int): Size of the vocabulary.
-#     - embed_dim (int): Dimension of the input embeddings.
-#     - num_heads (int): Number of attention heads.
-#     - num_layers (int): Number of transformer layers.
-#     - max_seq_length (int): Maximum sequence length.
-#     - dropout_rate (float): Dropout rate.
-#     - pe_max_len (int): Maximum length for positional encoding.
-#     - pe_dropout_rate (float): Dropout rate for positional encoding.
-
-#     Methods:
-#     - forward(x): Forward pass of the transformer model.
-
-#     Reference:
-#     - Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., 
-#     Jones, L., Gomez, A.N., Kaiser, Ł. and Polosukhin, I., 2017. 
-#     Attention is all you need. Advances in neural information processing systems, 30.
-#     """
-
-#     def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate, pe_max_len, pe_dropout_rate):
-#         super(SimpleTransformerModel, self).__init__()
-#         self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
-#         self.vocab_size = vocab_size
-#         self.embed = nn.Embedding(vocab_size, embed_dim)
-#         transformer_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout_rate, batch_first=True)
-#         self.transformer = nn.TransformerEncoder(transformer_layer, num_layers)
-#         self.out = nn.Linear(embed_dim, vocab_size)
-
-#     def forward(self, x):
-#         x = self.embed(x)
-#         x = self.pos_encoding(x)  # Apply positional encoding after embedding
-#         x = self.transformer(x)
-#         return self.out(x)
-
-# class LongformerModel(nn.Module):
-#     """
-#     Longformer model for processing long sequences.
-
-#     This class defines a Longformer model that can handle long input sequences efficiently
-#     by using a combination of local and global attention mechanisms. It is based on the
-#     Longformer architecture introduced by Beltagy et al. (2020).
-
-#     Args:
-#     - vocab_size (int): Size of the vocabulary.
-#     - embed_dim (int): Dimension of the input embeddings.
-#     - num_heads (int): Number of attention heads.
-#     - num_layers (int): Number of Longformer layers.
-#     - max_seq_length (int): Maximum sequence length.
-#     - dropout_rate (float): Dropout rate for the model.
-#     - pe_max_len (int): Maximum length for positional encoding.
-#     - pe_dropout_rate (float): Dropout rate for positional encoding.
-#     - longformer_config (LongformerConfig): Configuration object for the Longformer model.
-
-#     Attributes:
-#     - pos_encoding (PositionalEncoding): Positional encoding module.
-#     - vocab_size (int): Size of the vocabulary.
-#     - embed (nn.Embedding): Embedding layer for input tokens.
-#     - longformer_layers (nn.ModuleList): List of Longformer self-attention layers.
-#     - out (nn.Linear): Output linear layer for token prediction.
-
-#     Methods:
-#         forward(x): Perform forward pass through the Longformer model.
-
-#     References:
-#         - Beltagy, I., Peters, M. E., & Cohan, A. (2020). Longformer: The Long-Document Transformer.
-#           arXiv preprint arXiv:2004.05150.
-#     """
-
-#     def __init__(self, vocab_size, embed_dim, num_heads, num_layers, max_seq_length,
-#                  dropout_rate, pe_max_len, pe_dropout_rate, longformer_config):
-#         super(LongformerModel, self).__init__()
-#         self.pos_encoding = PositionalEncoding(embed_dim, pe_max_len, dropout=pe_dropout_rate)
-#         self.vocab_size = vocab_size
-#         self.embed = nn.Embedding(vocab_size, embed_dim)
-
-#         self.longformer_layers = nn.ModuleList([
-#             LongformerSelfAttention(longformer_config, layer_id=i)
-#             for i in range(num_layers)
-#         ])
-
-#         self.out = nn.Linear(embed_dim, vocab_size)
-
-#     def forward(self, x):
-#         x = self.embed(x)
-#         x = self.pos_encoding(x)
-
-#         attention_mask = torch.ones(x.size()[:-1], dtype=torch.long, device=x.device)
-
-#         # Generate is_index_masked tensor
-#         is_index_masked = torch.zeros_like(attention_mask, dtype=torch.bool)
-
-#         for longformer_layer in self.longformer_layers:
-#             x = longformer_layer(x, attention_mask=attention_mask, is_index_masked=is_index_masked)[0]
-
-#         return self.out(x)
 
 class GenomeDataset(torch.utils.data.Dataset):
     """
@@ -816,20 +716,6 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
 
-# if model_type == 'transformer':
-#     model = SimpleTransformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate)
-# elif model_type == 'longformer':
-#     attention_window = args.attention_window
-#     longformer_config = LongformerConfig(
-#         hidden_size=embed_dim,
-#         num_attention_heads=num_heads,
-#         num_hidden_layers=num_layers,
-#         attention_window=[attention_window] * num_layers,
-#         intermediate_size=4 * embed_dim,
-#     )
-#     model = LongformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length, dropout_rate=model_dropout_rate, pe_max_len=pe_max_len, pe_dropout_rate=pe_dropout_rate, longformer_config=longformer_config)
-#elif model_type == 'BARTlongformer':
-    # from https://huggingface.co/docs/transformers/v4.41.3/en/model_doc/led
 BARTlongformer_config = LEDConfig(
     vocab_size=vocab_size,
     d_model=embed_dim,
@@ -845,8 +731,6 @@ BARTlongformer_config = LEDConfig(
     attention_window = args.attention_window
 )
 model = LEDForConditionalGeneration(BARTlongformer_config)
-# else:
-#     raise ValueError(f"Invalid model type: {model_type}")
 
 early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta, verbose=True)
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -854,7 +738,7 @@ print(f"Total number of trainable parameters: {total_params}", flush=True)
 
 # determine number of GPUs to use
 num_gpus = torch.cuda.device_count()
-num_workers = 1 if num_gpus == 0 else num_gpus
+num_workers = args.num_workers
 if num_gpus > 0:
     print("{} GPU(s) available, using cuda".format(num_gpus))
 
