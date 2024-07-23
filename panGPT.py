@@ -143,7 +143,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
-    #parser.add_argument("--device", type=int, default=0, help="GPU device number if available. Default = 0")
+    parser.add_argument("--device", default=None, help="GPU device number if available. If not specified, will use all available Default = None")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of threads for data loading. Default = 1")
     parser.add_argument("--prop_masked", type=float, default=0.3, help="Average proportion of inputs to be masked. Default = 0.3")
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
@@ -164,6 +164,7 @@ params = vars(args)  # Convert the parsed arguments to a dictionary
 
 input_file = args.input_file
 #model_type = args.model_type
+device = args.device
 attention_window=args.attention_window
 embed_dim = args.embed_dim
 num_heads = args.num_heads
@@ -738,16 +739,22 @@ print(f"Total number of trainable parameters: {total_params}", flush=True)
 
 # determine number of GPUs to use
 num_gpus = torch.cuda.device_count()
-num_workers = args.num_workers
-if num_gpus > 0:
-    print("{} GPU(s) available, using cuda".format(num_gpus))
+if device is None:
+    num_workers = args.num_workers
+    if num_gpus > 0:
+        print("{} GPU(s) available, using cuda".format(num_gpus))
 
-    device = torch.device("cuda") # Run on a GPU if one is available
+        device = torch.device("cuda") # Run on a GPU if one is available
+        model = nn.DataParallel(model, device_ids=[i for i in range(num_gpus)])
+    else:
+        print("GPU not available, using cpu.")
+        device = torch.device("cpu")
 else:
-    print("GPU not available, using cpu.")
-    device = torch.device("cpu")
+    if num_gpus > 0 and device != "cpu":
+         device = torch.device("cuda:{device}".format(device))
+    else:
+        device = torch.device("cpu")
 logging.info(f"device = {device}")
-model = nn.DataParallel(model, device_ids=[i for i in range(num_gpus)])
 model.to(device)
 
 # training dataset
