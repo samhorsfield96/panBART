@@ -100,11 +100,11 @@ def mask_integers(string, prop_masked):
     else:
         return string    
 
-def pad_input(input, max_length, tokenizer, labels=False):
+def pad_input(input, max_length, pad_token_id, labels=False):
 
     len_masked = len(input)
     if labels == False:
-        input.extend([tokenizer.pad_token_id] * (max_length - len_masked))
+        input.extend([pad_token_id] * (max_length - len_masked))
     else:
         input.extend([-100] * (max_length - len_masked))
 
@@ -121,6 +121,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train a transformer model on (pan)'omic data.")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input file")
     #parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "longformer", "BARTlongformer"], help="Type of model to use: 'transformer' or 'longformer'")
+    parser.add_argument("--tokenizer", type=str, default="WordLevel", choices=["WordLevel", "BPE"], help="Tokeniser type to use, WordLevel or BPE")
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
@@ -137,7 +138,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--max_vocab_size", type=int, default=70000, help="Maximum vocabulary size. Tokens beyond this size will be mapped to <UNK>.")
     parser.add_argument("--model_save_path", type=str, default="./model_checkpoint.pth", help="Path to save the model checkpoint")
-    parser.add_argument("--tokenizer_dir", type=str, default="./pangenome_gpt_tokenizer", help="Dirname for saving and loading the tokenizer")
+    parser.add_argument("--tokenizer_path", type=str, default="./pangenome_gpt_tokenizer", help="Path for saving and loading the tokenizer. If BPE is directory, if WordLevel is file.")
     parser.add_argument("--train_size", type=float, default=0.8, help="Proportion of the dataset to include in the training set")
     parser.add_argument("--val_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -181,7 +182,7 @@ min_delta = args.min_delta
 epochs = args.epochs
 max_vocab_size = args.max_vocab_size
 model_save_path = args.model_save_path
-tokenizer_dir = args.tokenizer_dir
+tokenizer_path = args.tokenizer_path
 train_size = args.train_size
 val_size = args.val_size
 seed = args.seed
@@ -510,13 +511,25 @@ logging.info(
 )
 
 if not args.reuse_tokenizer:
-    tokenizer = ByteLevelBPETokenizer()
-    tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
-    tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=["<s>","<pad>", "</s>","<unk>", "<mask>",])
-    Path(tokenizer_dir).mkdir(parents=True, exist_ok=True)
-    tokenizer.save_model(tokenizer_dir)
-tokenizer = LEDTokenizer.from_pretrained(tokenizer_dir, add_prefix_space=True)
-vocab_size = tokenizer.vocab_size
+    if args.tokenizer == "BPE":
+        tokenizer = ByteLevelBPETokenizer()
+        tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
+        tokenizer.train_from_iterator(genomes, vocab_size=vocab_size, special_tokens=["<s>","<pad>", "</s>","<unk>", "<mask>",])
+        Path(tokenizer_path).mkdir(parents=True, exist_ok=True)
+        tokenizer.save_model(tokenizer_path)
+    elif args.tokenizer == "WordLevel":
+        tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
+        tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+        trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
+        tokenizer.train_from_iterator(genomes, trainer)
+        tokenizer.save(tokenizer_path)
+
+if args.tokenizer == "BPE":
+    tokenizer = LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
+    vocab_size = tokenizer.vocab_size
+elif args.tokenizer == "WordLevel":
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+    vocab_size = tokenizer.get_vocab_size()
 
 if train_size + val_size > 1.0:
     raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
@@ -577,12 +590,18 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, tokenizer_type):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
         self.prop_masked = prop_masked
-        self.mask_token = self.tokenizer.mask_token_id
+        self.tokenizer_type = tokenizer_type
+        if self.tokenizer_type == "BPE":
+            self.mask_token = self.tokenizer.mask_token_id
+            self.pad_token = self.tokenizer.pad_token_id
+        else:
+            self.mask_token = self.tokenizer.encode("<mask>")
+            self.pad_token = self.tokenizer.encode("<pad>")
 
     def __len__(self):
         return len(self.texts)
@@ -634,12 +653,12 @@ class GenomeDataset(torch.utils.data.Dataset):
             beginning = 1
 
         len_decoder = len(decoder_input)
-        decoder_input = pad_input(decoder_input, self.max_length, tokenizer)
+        decoder_input = pad_input(decoder_input, self.max_length, self.pad_token)
 
         decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
         decoder_attention_mask[len_decoder:] = 0
 
-        labels = pad_input(labels, self.max_length, tokenizer, labels=True)
+        labels = pad_input(labels, self.max_length, self.pad_token, labels=True)
 
         # merge consecutive masks into single mask token
         encoder_input = ' '.join([str(i) for i in encoder_input])
@@ -654,7 +673,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         encoder_input = [int(i) for i in encoder_input.split()]
 
         len_masked = len(encoder_input)
-        encoder_input = pad_input(encoder_input, self.max_length, tokenizer)
+        encoder_input = pad_input(encoder_input, self.max_length, self.pad_token)
 
         #print('encoder_input post padding')
         #print(encoder_input)
@@ -667,16 +686,16 @@ class GenomeDataset(torch.utils.data.Dataset):
         encoder_attention_mask[len_masked:] = 0
         #encoder_attention_mask[mask_idx] = 0
 
-        #print("labels")
-        #print(labels)
-        #print("decoder_input")
-        #print(decoder_input)
-        #print("decoder_attention_mask")
-        #print(decoder_attention_mask.tolist())
-        #print("encoder_input")
-        #print(encoder_input)
-        #print("encoder_attention_mask")
-        #print(encoder_attention_mask.tolist())
+        # print("labels")
+        # print(labels)
+        # print("decoder_input")
+        # print(decoder_input)
+        # print("decoder_attention_mask")
+        # print(decoder_attention_mask.tolist())
+        # print("encoder_input")
+        # print(encoder_input)
+        # print("encoder_attention_mask")
+        # print(encoder_attention_mask.tolist())
 
         return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
 
@@ -751,21 +770,21 @@ if device is None:
         device = torch.device("cpu")
 else:
     if num_gpus > 0 and device != "cpu":
-         device = torch.device("cuda:{device}".format(device))
+         device = torch.device("cuda:{}".format(device))
     else:
         device = torch.device("cpu")
 logging.info(f"device = {device}")
 model.to(device)
 
 # training dataset
-train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked)
+train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
 #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
 train_dataset.attention_window = attention_window
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
 train_dataset_size = len(train_loader.dataset)
 
 # validation dataset
-val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked)
+val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
 #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
 val_dataset.attention_window = attention_window
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
@@ -823,7 +842,7 @@ for epoch in range(start_epoch, epochs):
     writer.close()
 
 if len(test_genomes) > 0:
-    test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked)
+    test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
     #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
     test_dataset.attention_window = attention_window
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
