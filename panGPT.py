@@ -149,6 +149,7 @@ def parse_args():
     parser.add_argument("--prop_masked", type=float, default=0.3, help="Average proportion of inputs to be masked. Default = 0.3")
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
     parser.add_argument("--reuse_tokenizer", default=False, action="store_true", help="Reuse existing tokenizer if present.")
+    parser.add_argument("--gradient_checkpointing", default=False, action="store_true", help="Use gradient checkpointing during training. Improves memory efficiency at cost to runtime.")
     
     args = parser.parse_args()
 
@@ -370,26 +371,33 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size):
         beginning = torch.nonzero(beginning)
 
         # set global attention for all tokens so that all positions attend to all others.
-        global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
-        global_attention_mask[beginning,[0]] = 1
+        #global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
+        #global_attention_mask[beginning,[0]] = 1
         
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits  # Generate predictions
         
         # Free GPU memory
         del encoder_input
         del encoder_attention_mask
         del decoder_input
         del decoder_attention_mask
-        del global_attention_mask
+        #del global_attention_mask
+
+        torch.cuda.empty_cache()
 
         labels = labels.to(device)
         
         loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
-        loss.backward()  # Compute gradient of the loss w.r.t. network parameters
-        optimizer.step()  # Update parameters based on gradient
 
         total_train_loss += loss.item() * labels.size(0)  # Accumulate the loss
+        
+        del labels
+        torch.cuda.empty_cache()
+
+        loss.backward()  # Compute gradient of the loss w.r.t. network parameters
+        optimizer.step()  # Update parameters based on gradient
+        
         # Update the progress bar
         train_loader.set_description(f"Epoch {epoch} - Training")
         train_loader.update(1)
@@ -453,17 +461,19 @@ def validate_model(val_loader, model, criterion, device, vocab_size, epoch=None)
 
             beginning = torch.nonzero(beginning)
 
-            global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
-            global_attention_mask[beginning,[0]] = 1
+            #global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
+            #global_attention_mask[beginning,[0]] = 1
 
-            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits  # Generate predictions
             
             # Free GPU memory
             del encoder_input
             del encoder_attention_mask
             del decoder_input
             del decoder_attention_mask
-            del global_attention_mask
+            #del global_attention_mask
+
+            torch.cuda.empty_cache()
 
             labels = labels.to(device)
             
@@ -600,8 +610,8 @@ class GenomeDataset(torch.utils.data.Dataset):
             self.mask_token = self.tokenizer.mask_token_id
             self.pad_token = self.tokenizer.pad_token_id
         else:
-            self.mask_token = self.tokenizer.encode("<mask>")
-            self.pad_token = self.tokenizer.encode("<pad>")
+            self.mask_token = self.tokenizer.encode("<mask>").ids[0]
+            self.pad_token = self.tokenizer.encode("<pad>").ids[0]
 
     def __len__(self):
         return len(self.texts)
@@ -609,7 +619,10 @@ class GenomeDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         text = self.texts[idx]
 
-        input = self.tokenizer.encode(text)
+        if self.tokenizer_type == "BPE":
+            input = self.tokenizer.encode(text)
+        else:
+            input = self.tokenizer.encode(text).ids
 
         beginning = 0
 
@@ -627,29 +640,41 @@ class GenomeDataset(torch.utils.data.Dataset):
             # decode to get input string, then mask and re-encode to ensure same string is learned from in decoder and encoder
             # mask will remove characters, so indexes do not map between decoder_input and encoder_input
             text = tokenizer.decode(labels, skip_special_tokens=True)
-            #print("pre-masking")
-            #print(text)
+            # print("pre-masking")
+            # print(text)
             text_masked = mask_integers(text, self.prop_masked)
-            #print("after masking")
-            #print(text_masked)
+            # print("after masking")
+            # print(text_masked)
 
-            # encode, removing <s> and </s> token if not at end of genome
-            if start_index == (len(input) - self.max_length - 1):
-                encoder_input = self.tokenizer.encode(text_masked)
-            elif start_index == 0:
-                encoder_input = self.tokenizer.encode(text_masked)[:-1]
+            # encode, removing <s> and </s> token if not at end of genome for BPE
+            if self.tokenizer_type == "BPE":
+                if start_index == (len(input) - self.max_length - 1):
+                    encoder_input = self.tokenizer.encode(text_masked)
+                elif start_index == 0:
+                    encoder_input = self.tokenizer.encode(text_masked)[:-1]
+                else:
+                    encoder_input = self.tokenizer.encode(text_masked)[1:-1]
             else:
-                encoder_input = self.tokenizer.encode(text_masked)[1:-1]
+                if start_index == (len(input) - self.max_length - 1):
+                    encoder_input = self.tokenizer.encode(text_masked).ids
+                elif start_index == 0:
+                    encoder_input = self.tokenizer.encode(text_masked).ids
+                else:
+                    encoder_input = self.tokenizer.encode(text_masked).ids
 
             beginning = 1 if start_index == 0 else 0
         else:
             # generate decoder and labels input, wrapping decoder input to right
             labels = input
-            decoder_input = [labels[-1]]
-            decoder_input.extend(labels[:-1])
             
             text_masked = mask_integers(text, self.prop_masked)
-            encoder_input = self.tokenizer.encode(text_masked)
+            if self.tokenizer_type == "BPE":
+                encoder_input = self.tokenizer.encode(text_masked)
+                decoder_input = [labels[-1]]
+                decoder_input.extend(labels[:-1])
+            else:
+                encoder_input = self.tokenizer.encode(text_masked).ids
+                decoder_input = labels[:-1]
             beginning = 1
 
         len_decoder = len(decoder_input)
@@ -692,10 +717,10 @@ class GenomeDataset(torch.utils.data.Dataset):
         # print(decoder_input)
         # print("decoder_attention_mask")
         # print(decoder_attention_mask.tolist())
-        # print("encoder_input")
-        # print(encoder_input)
-        # print("encoder_attention_mask")
-        # print(encoder_attention_mask.tolist())
+        #print("encoder_input")
+        #print(encoder_input)
+        #print("encoder_attention_mask")
+        #print(encoder_attention_mask.tolist())
 
         return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
 
@@ -751,6 +776,9 @@ BARTlongformer_config = LEDConfig(
     attention_window = args.attention_window
 )
 model = LEDForConditionalGeneration(BARTlongformer_config)
+if args.gradient_checkpointing == True:
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
 
 early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta, verbose=True)
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -758,8 +786,8 @@ print(f"Total number of trainable parameters: {total_params}", flush=True)
 
 # determine number of GPUs to use
 num_gpus = torch.cuda.device_count()
+num_workers = args.num_workers
 if device is None:
-    num_workers = args.num_workers
     if num_gpus > 0:
         print("{} GPU(s) available, using cuda".format(num_gpus))
 
