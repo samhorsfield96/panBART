@@ -136,7 +136,7 @@ def parse_args():
     parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--min_delta", type=float, default=0.01, help="Minimum delta for early stopping")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
-    parser.add_argument("--max_vocab_size", type=int, default=70000, help="Maximum vocabulary size. Tokens beyond this size will be mapped to <UNK>.")
+    parser.add_argument("--max_vocab_size", type=int, default=None, help="Maximum vocabulary size. Tokens beyond this size will be mapped to <UNK>. If not set, will infer maximum, although may lead to OOM issue.")
     parser.add_argument("--model_save_path", type=str, default="./model_checkpoint.pth", help="Path to save the model checkpoint")
     parser.add_argument("--tokenizer_path", type=str, default="./pangenome_gpt_tokenizer", help="Path for saving and loading the tokenizer. If BPE is directory, if WordLevel is file.")
     parser.add_argument("--train_size", type=float, default=0.8, help="Proportion of the dataset to include in the training set")
@@ -508,7 +508,10 @@ def validate_model(val_loader, model, criterion, device, vocab_size, epoch=None)
 genomes = load_dataset(input_file)
 unique_tokens = set(token for genome in genomes for token in genome.split())
 actual_vocab_size = len(unique_tokens)
-vocab_size = min(actual_vocab_size, max_vocab_size)
+if max_vocab_size is not None:
+    vocab_size = min(actual_vocab_size, max_vocab_size)
+else:
+    vocab_size = actual_vocab_size
 num_sequences = len(genomes)
 sequence_lengths = [len(genome.split()) for genome in genomes]
 min_sequence_length = min(sequence_lengths)
