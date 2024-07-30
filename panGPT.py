@@ -384,7 +384,7 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size):
         del decoder_attention_mask
         #del global_attention_mask
 
-        torch.cuda.empty_cache()
+        #torch.cuda.empty_cache()
 
         labels = labels.to(device)
         
@@ -393,7 +393,7 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size):
         total_train_loss += loss.item() * labels.size(0)  # Accumulate the loss
         
         del labels
-        torch.cuda.empty_cache()
+        #torch.cuda.empty_cache()
 
         loss.backward()  # Compute gradient of the loss w.r.t. network parameters
         optimizer.step()  # Update parameters based on gradient
@@ -473,7 +473,7 @@ def validate_model(val_loader, model, criterion, device, vocab_size, epoch=None)
             del decoder_attention_mask
             #del global_attention_mask
 
-            torch.cuda.empty_cache()
+            #torch.cuda.empty_cache()
 
             labels = labels.to(device)
             
@@ -792,7 +792,7 @@ if device is None:
         print("{} GPU(s) available, using cuda".format(num_gpus))
 
         device = torch.device("cuda") # Run on a GPU if one is available
-        model = nn.DataParallel(model, device_ids=[i for i in range(num_gpus)])
+        model = DDP(model)
     else:
         print("GPU not available, using cpu.")
         device = torch.device("cpu")
