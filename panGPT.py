@@ -255,7 +255,7 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     except IOError as e:
         print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, checkpoint_path, restart):
+def load_checkpoint(model, optimizer, checkpoint_path, restart, map_location):
     """
     Load a model checkpoint from a file.
 
@@ -280,7 +280,7 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart):
         if restart:
             print("Restarting training, overwriting existing checkpoint.")
             return 0, False
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -697,7 +697,11 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
     lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
 
-    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart)
+    # Use a barrier() to make sure that process 1 loads the model after process
+    # 0 saves it.
+    dist.barrier()
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart, map_location)
 
     if is_checkpoint_loaded:
         logging.info("Continuing training from the loaded checkpoint.")
@@ -707,7 +711,6 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
 
     early_stop_triggered = False
     writer = SummaryWriter(log_dir=log_dir)
-    print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
     for epoch in range(start_epoch, epochs):
         if early_stop_triggered:
             break
@@ -966,6 +969,7 @@ def main():
         train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
         val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
 
+    print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
     mp.spawn(run_model,
              args=(world_size, args, genomes, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes),
              nprocs=world_size,
