@@ -724,7 +724,9 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, train_dataset_size, epoch)
 
         total_train_loss_tensor = torch.tensor(total_train_loss).to(rank)
-        dist.all_reduce(total_train_loss_tensor, op=dist.ReduceOp.SUM)
+
+        if DDP_active:
+            dist.all_reduce(total_train_loss_tensor, op=dist.ReduceOp.SUM)
         avg_train_loss = total_train_loss_tensor.item() / train_dataset_size
         train_perplexity = torch.exp(torch.tensor(avg_train_loss))
         
@@ -739,24 +741,24 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         total_val_loss, total_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, val_dataset_size, epoch)
         
         total_val_loss_tensor = torch.tensor(total_val_loss).to(rank)
-        dist.all_reduce(total_val_loss_tensor, op=dist.ReduceOp.SUM)
-        avg_val_loss = total_val_loss_tensor.item() / val_dataset_size
-        val_perplexity = torch.exp(torch.tensor(avg_val_loss))
-
         total_accuracy_tensor = torch.tensor(total_accuracy).to(rank)
-        dist.all_reduce(total_accuracy_tensor, op=dist.ReduceOp.SUM)
-        val_accuracy = total_accuracy_tensor.item() / val_dataset_size
-
         val_precision_tensor = torch.tensor(val_precision).to(rank)
         val_recall_tensor = torch.tensor(val_recall).to(rank)
         val_f1_tensor = torch.tensor(val_f1).to(rank)
         val_kappa_tensor = torch.tensor(val_kappa).to(rank)
 
-        dist.all_reduce(val_precision_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(val_recall_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(val_f1_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(val_kappa_tensor, op=dist.ReduceOp.SUM)
+        # get results from all GPUs
+        if DDP_active:
+            dist.all_reduce(total_val_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_accuracy_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(val_precision_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(val_recall_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(val_f1_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(val_kappa_tensor, op=dist.ReduceOp.SUM)
 
+        avg_val_loss = total_val_loss_tensor.item() / val_dataset_size
+        val_perplexity = torch.exp(torch.tensor(avg_val_loss))
+        val_accuracy = total_accuracy_tensor.item() / val_dataset_size
         val_precision = val_precision_tensor.item() / world_size
         val_recall = val_recall_tensor.item() / world_size
         val_f1 = val_f1_tensor.item() / world_size
@@ -796,24 +798,24 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         total_test_loss, total_test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, test_dataset_size)
         
         total_test_loss_tensor = torch.tensor(total_test_loss).to(rank)
-        dist.all_reduce(total_test_loss_tensor, op=dist.ReduceOp.SUM)
-        avg_test_loss = total_test_loss_tensor.item() / test_dataset_size
-        test_perplexity = torch.exp(torch.tensor(avg_test_loss))
-
         total_accuracy_tensor = torch.tensor(total_test_accuracy).to(rank)
-        dist.all_reduce(total_accuracy_tensor, op=dist.ReduceOp.SUM)
-        test_accuracy = total_accuracy_tensor.item() / test_dataset_size
-
         test_precision_tensor = torch.tensor(test_precision).to(rank)
         test_recall_tensor = torch.tensor(test_recall).to(rank)
         test_f1_tensor = torch.tensor(test_f1).to(rank)
         test_kappa_tensor = torch.tensor(test_kappa).to(rank)
 
-        dist.all_reduce(test_precision_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(test_recall_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(test_f1_tensor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(test_kappa_tensor, op=dist.ReduceOp.SUM)
-
+        # get results from all GPUs
+        if DDP_active:
+            dist.all_reduce(total_test_loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(total_accuracy_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(test_precision_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(test_recall_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(test_f1_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(test_kappa_tensor, op=dist.ReduceOp.SUM)
+        
+        avg_test_loss = total_test_loss_tensor.item() / test_dataset_size
+        test_perplexity = torch.exp(torch.tensor(avg_test_loss))
+        test_accuracy = total_accuracy_tensor.item() / test_dataset_size
         test_precision = test_precision_tensor.item() / world_size
         test_recall = test_recall_tensor.item() / world_size
         test_f1 = test_f1_tensor.item() / world_size
