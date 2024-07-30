@@ -254,7 +254,7 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     except IOError as e:
         print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, checkpoint_path, restart, map_location=None):
+def load_checkpoint(model, optimizer, checkpoint_path, restart, rank, map_location=None):
     """
     Load a model checkpoint from a file.
 
@@ -633,7 +633,7 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
 
-def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, DDP_active=False):
+def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size, DDP_active=False):
     if DDP_active:
         setup(rank, world_size)
 
@@ -646,18 +646,10 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     lr_patience = args.lr_patience
     epochs = args.epochs
     model_save_path = args.model_save_path
-    tokenizer_path = args.tokenizer_path
     log_dir = args.log_dir
     prop_masked = args.prop_masked
     restart = args.restart
     num_workers = args.num_workers
-
-    if args.tokenizer == "BPE":
-        tokenizer = LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
-        vocab_size = tokenizer.vocab_size
-    elif args.tokenizer == "WordLevel":
-        tokenizer = Tokenizer.from_file(tokenizer_path)
-        vocab_size = tokenizer.get_vocab_size()
 
     # determine number of GPUs to use
     #num_gpus = torch.cuda.device_count()
@@ -705,8 +697,8 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     # 0 saves it.
     map_location = None
     if DDP_active:
-        dist.barrier()
         map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        dist.barrier()
     start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart, map_location)
 
     if rank == 0:
@@ -858,33 +850,21 @@ def main():
     params = vars(args)  # Convert the parsed arguments to a dictionary
 
     input_file = args.input_file
-    #model_type = args.model_type
     device = args.device
     attention_window=args.attention_window
     embed_dim = args.embed_dim
     num_heads = args.num_heads
     num_layers = args.num_layers
     max_seq_length = args.max_seq_length
-    batch_size = args.batch_size
     model_dropout_rate = args.model_dropout_rate
-    learning_rate = args.learning_rate
-    lr_scheduler_factor = args.lr_scheduler_factor
-    weight_decay = args.weight_decay
-    lr_patience = args.lr_patience
     early_stop_patience =args.early_stop_patience
     min_delta = args.min_delta
-    epochs = args.epochs
     max_vocab_size = args.max_vocab_size
     model_save_path = args.model_save_path
     tokenizer_path = args.tokenizer_path
     train_size = args.train_size
     val_size = args.val_size
     seed = args.seed
-    #pe_max_len = args.pe_max_len
-    pe_dropout_rate = args.pe_dropout_rate
-    log_dir = args.log_dir
-    prop_masked = args.prop_masked
-    restart = args.restart
 
     # Check if max_seq_length is a multiple of attention_window when using Longformer
     #if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % attention_window != 0:
@@ -909,7 +889,7 @@ def main():
 
     genomes = load_dataset(input_file)
     unique_tokens = set(token for genome in genomes for token in genome.split())
-    actual_vocab_size = len(unique_tokens)
+    actual_vocab_size = int(len(unique_tokens))
     if max_vocab_size is not None:
         vocab_size = min(actual_vocab_size, max_vocab_size)
     else:
@@ -940,6 +920,13 @@ def main():
             tokenizer.save(tokenizer_path)
 
     print_banner()
+
+    if args.tokenizer == "BPE":
+        tokenizer = LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
+        vocab_size = tokenizer.vocab_size
+    elif args.tokenizer == "WordLevel":
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+        vocab_size = tokenizer.get_vocab_size()
 
     BARTlongformer_config = LEDConfig(
         vocab_size=vocab_size,
@@ -986,14 +973,15 @@ def main():
         train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
         val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
 
+
     print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
     if DDP_active:
         mp.spawn(run_model,
-                args=(world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, DDP_active),
+                args=(world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size, DDP_active),
                 nprocs=world_size,
                 join=True)
     else:
-        run_model(device, 1, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes)
+        run_model(device, 1, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size)
 
 if __name__ == "__main__":
     main()
