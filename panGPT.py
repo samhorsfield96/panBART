@@ -8,14 +8,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+import torch.multiprocessing as mp
 import psutil
 import gc
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, cohen_kappa_score
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers, ByteLevelBPETokenizer
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import warnings
 import random
 import numpy as np
@@ -41,6 +42,9 @@ logging.basicConfig(
 
 # DDP setup
 def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
@@ -73,8 +77,6 @@ def print_banner():
     print("Licensed under the GNU General Public License v3.0")
     print("Full license at: https://www.gnu.org/licenses/gpl-3.0.en.html")
     print(border_line)
-
-print_banner()
 
 def mask_integers(string, prop_masked):   
    
@@ -629,9 +631,190 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
 
+def run_model(rank, world_size, args, genomes):
+    setup(rank, world_size)
+
+    #model_type = args.model_type
+    device = args.device
+    attention_window=args.attention_window
+    embed_dim = args.embed_dim
+    num_heads = args.num_heads
+    num_layers = args.num_layers
+    max_seq_length = args.max_seq_length
+    batch_size = args.batch_size
+    model_dropout_rate = args.model_dropout_rate
+    learning_rate = args.learning_rate
+    lr_scheduler_factor = args.lr_scheduler_factor
+    weight_decay = args.weight_decay
+    lr_patience = args.lr_patience
+    early_stop_patience =args.early_stop_patience
+    min_delta = args.min_delta
+    epochs = args.epochs
+    model_save_path = args.model_save_path
+    tokenizer_path = args.tokenizer_path
+    train_size = args.train_size
+    val_size = args.val_size
+    seed = args.seed
+    log_dir = args.log_dir
+    prop_masked = args.prop_masked
+    restart = args.restart
+
+    if args.tokenizer == "BPE":
+        tokenizer = LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
+        vocab_size = tokenizer.vocab_size
+    elif args.tokenizer == "WordLevel":
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+        vocab_size = tokenizer.get_vocab_size()
+
+    if train_size + val_size > 1.0:
+        raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
+    if train_size + val_size == 1.0:
+        train_genomes, val_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
+        test_genomes = []
+    else:
+        train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
+        val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
+
+    BARTlongformer_config = LEDConfig(
+    vocab_size=vocab_size,
+    d_model=embed_dim,
+    encoder_layers=num_layers,
+    decoder_layers=num_layers,
+    encoder_attention_heads=num_heads,
+    decoder_attention_heads=num_heads,
+    decoder_ffn_dim=4 * embed_dim,
+    encoder_ffn_dim=4 * embed_dim,
+    max_encoder_position_embeddings=max_seq_length,
+    max_decoder_position_embeddings=max_seq_length,
+    dropout=model_dropout_rate,
+    attention_window = args.attention_window)
+
+    model = LEDForConditionalGeneration(BARTlongformer_config)
+    if args.gradient_checkpointing == True:
+        model.gradient_checkpointing_enable()
+        model.config.use_cache = False
+
+    early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta, verbose=True)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total number of trainable parameters: {total_params}", flush=True)
+
+    # determine number of GPUs to use
+    num_gpus = torch.cuda.device_count()
+    num_workers = args.num_workers
+    DDP_active = False
+    if device is None:
+        if num_gpus > 0:
+            print("{} GPU(s) available, using cuda".format(num_gpus))
+
+            device = torch.device("cuda") # Run on a GPU if one is available
+            #model = DDP(model)
+        else:
+            print("GPU not available, using cpu.")
+            device = torch.device("cpu")
+    else:
+        if num_gpus > 0 and device != "cpu":
+            device = torch.device("cuda:{}".format(device))
+        else:
+            device = torch.device("cpu")
+    logging.info(f"device = {device}")
+    model = DDP(model.to(rank), device_ids=[rank])
+    device = rank
+
+    # training dataset
+    train_sampler = DistributedSampler(train_genomes, num_replicas=world_size, rank=rank)
+    train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
+    train_dataset.attention_window = attention_window
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, sampler=train_sampler)
+    train_dataset_size = len(train_loader.dataset)
+
+    # validation dataset
+    val_sampler = DistributedSampler(val_genomes, num_replicas=world_size, rank=rank)
+    val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
+    val_dataset.attention_window = attention_window
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, sampler=val_sampler)
+    val_dataset_size = len(val_loader.dataset)
+
+    criterion = torch.nn.CrossEntropyLoss().to(rank) # what are we trying to optimize?
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
+    lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
+
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart)
+
+    if is_checkpoint_loaded:
+        logging.info("Continuing training from the loaded checkpoint.")
+    else:
+        logging.info("Starting training from scratch.")
+        start_epoch = 0
+
+    print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
+    for epoch in range(start_epoch, epochs):
+        writer = SummaryWriter(log_dir=log_dir)
+        # Training model loop
+        train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
+        avg_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, train_dataset_size, epoch)
+        train_perplexity = torch.exp(torch.tensor(avg_train_loss))
+        # Log training metrics
+        logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
+        writer.add_scalar("Loss/train", avg_train_loss, epoch)
+        writer.add_scalar("Perplexity/train", train_perplexity, epoch)
+
+        # Validate model loop
+        val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
+        avg_val_loss, val_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, val_dataset_size, epoch)
+        val_perplexity = torch.exp(torch.tensor(avg_val_loss))
+        # Log validation metrics
+        logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
+        writer.add_scalar("Loss/val", avg_val_loss, epoch)
+        writer.add_scalar("Perplexity/val", val_perplexity, epoch)
+        writer.add_scalar("Accuracy/val", val_accuracy, epoch)
+        writer.add_scalar("Precision/val", val_precision, epoch)
+        writer.add_scalar("Recall/val", val_recall, epoch)
+        writer.add_scalar("F1/val", val_f1, epoch)
+        writer.add_scalar("Kappa/val", val_kappa, epoch)
+        writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
+
+        lr_scheduler.step(avg_val_loss)
+        early_stopping(avg_val_loss)
+        if early_stopping.early_stop:
+            print("Early stopping triggered.", flush=True)
+            break
+        elif avg_val_loss <= early_stopping.best_loss:
+            print("Saving model checkpoint.", flush=True)
+            save_checkpoint(model, optimizer, epoch, avg_train_loss, model_save_path)
+
+        gc.collect()
+        writer.close()
+
+    if len(test_genomes) > 0:
+        test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
+        test_sampler = DistributedSampler(test_genomes, num_replicas=world_size, rank=rank)
+        test_dataset.attention_window = attention_window
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, sampler=test_sampler)
+        test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
+        test_loader = tqdm(test_loader, desc="Testing", unit="batch")
+        # Test Model Loop
+        test_loss, test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, test_dataset_size)
+        test_perplexity = torch.exp(torch.tensor(test_loss))
+        # Log test metrics
+        logging.info(f'Test Loss: {test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}, Kappa: {test_kappa}')
+        # Create a new SummaryWriter instance for test metrics
+        test_writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
+        test_writer.add_scalar("Loss/test", test_loss)
+        test_writer.add_scalar("Perplexity/test", test_perplexity)
+        test_writer.add_scalar("Accuracy/test", test_accuracy)
+        test_writer.add_scalar("Precision/test", test_precision)
+        test_writer.add_scalar("Recall/test", test_recall)
+        test_writer.add_scalar("F1/test", test_f1)
+        test_writer.add_scalar("Kappa/test", test_kappa)
+        test_writer.close()
+
+    else:
+        print("No test set available for evaluation.", flush=True)
+
 
 def main():
     args = parse_args()
+
     params = vars(args)  # Convert the parsed arguments to a dictionary
 
     input_file = args.input_file
@@ -716,156 +899,14 @@ def main():
             tokenizer.train_from_iterator(genomes, trainer)
             tokenizer.save(tokenizer_path)
 
-    if args.tokenizer == "BPE":
-        tokenizer = LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
-        vocab_size = tokenizer.vocab_size
-    elif args.tokenizer == "WordLevel":
-        tokenizer = Tokenizer.from_file(tokenizer_path)
-        vocab_size = tokenizer.get_vocab_size()
+    print_banner()
 
-    if train_size + val_size > 1.0:
-        raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
-    if train_size + val_size == 1.0:
-        train_genomes, val_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
-        test_genomes = []
-    else:
-        train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
-        val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
-
-    BARTlongformer_config = LEDConfig(
-    vocab_size=vocab_size,
-    d_model=embed_dim,
-    encoder_layers=num_layers,
-    decoder_layers=num_layers,
-    encoder_attention_heads=num_heads,
-    decoder_attention_heads=num_heads,
-    decoder_ffn_dim=4 * embed_dim,
-    encoder_ffn_dim=4 * embed_dim,
-    max_encoder_position_embeddings=max_seq_length,
-    max_decoder_position_embeddings=max_seq_length,
-    dropout=model_dropout_rate,
-    attention_window = args.attention_window)
-
-
-    model = LEDForConditionalGeneration(BARTlongformer_config)
-    if args.gradient_checkpointing == True:
-        model.gradient_checkpointing_enable()
-        model.config.use_cache = False
-
-    early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta, verbose=True)
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total number of trainable parameters: {total_params}", flush=True)
-
-    # determine number of GPUs to use
-    num_gpus = torch.cuda.device_count()
-    num_workers = args.num_workers
-    if device is None:
-        if num_gpus > 0:
-            print("{} GPU(s) available, using cuda".format(num_gpus))
-
-            device = torch.device("cuda") # Run on a GPU if one is available
-            model = DDP(model)
-        else:
-            print("GPU not available, using cpu.")
-            device = torch.device("cpu")
-    else:
-        if num_gpus > 0 and device != "cpu":
-            device = torch.device("cuda:{}".format(device))
-        else:
-            device = torch.device("cpu")
-    logging.info(f"device = {device}")
-    model.to(device)
-
-    # training dataset
-    train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
-    #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-    train_dataset.attention_window = attention_window
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    train_dataset_size = len(train_loader.dataset)
-
-    # validation dataset
-    val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
-    #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-    val_dataset.attention_window = attention_window
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    val_dataset_size = len(val_loader.dataset)
-
-    criterion = torch.nn.CrossEntropyLoss() # what are we trying to optimize?
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
-    lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
-
-    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart)
-
-    if is_checkpoint_loaded:
-        logging.info("Continuing training from the loaded checkpoint.")
-    else:
-        logging.info("Starting training from scratch.")
-        start_epoch = 0
-
-    print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
-    for epoch in range(start_epoch, epochs):
-        writer = SummaryWriter(log_dir=log_dir)
-        # Training model loop
-        train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
-        avg_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, train_dataset_size, epoch)
-        train_perplexity = torch.exp(torch.tensor(avg_train_loss))
-        # Log training metrics
-        logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
-        writer.add_scalar("Loss/train", avg_train_loss, epoch)
-        writer.add_scalar("Perplexity/train", train_perplexity, epoch)
-
-        # Validate model loop
-        val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
-        avg_val_loss, val_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, val_dataset_size, epoch)
-        val_perplexity = torch.exp(torch.tensor(avg_val_loss))
-        # Log validation metrics
-        logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
-        writer.add_scalar("Loss/val", avg_val_loss, epoch)
-        writer.add_scalar("Perplexity/val", val_perplexity, epoch)
-        writer.add_scalar("Accuracy/val", val_accuracy, epoch)
-        writer.add_scalar("Precision/val", val_precision, epoch)
-        writer.add_scalar("Recall/val", val_recall, epoch)
-        writer.add_scalar("F1/val", val_f1, epoch)
-        writer.add_scalar("Kappa/val", val_kappa, epoch)
-        writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
-
-        lr_scheduler.step(avg_val_loss)
-        early_stopping(avg_val_loss)
-        if early_stopping.early_stop:
-            print("Early stopping triggered.", flush=True)
-            break
-        elif avg_val_loss <= early_stopping.best_loss:
-            print("Saving model checkpoint.", flush=True)
-            save_checkpoint(model, optimizer, epoch, avg_train_loss, model_save_path)
-
-        gc.collect()
-        writer.close()
-
-    if len(test_genomes) > 0:
-        test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
-        #if args.model_type == "longformer" or args.model_type == "BARTlongformer":
-        test_dataset.attention_window = attention_window
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-        test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
-        test_loader = tqdm(test_loader, desc="Testing", unit="batch")
-        # Test Model Loop
-        test_loss, test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, test_dataset_size)
-        test_perplexity = torch.exp(torch.tensor(test_loss))
-        # Log test metrics
-        logging.info(f'Test Loss: {test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}, Kappa: {test_kappa}')
-        # Create a new SummaryWriter instance for test metrics
-        test_writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
-        test_writer.add_scalar("Loss/test", test_loss)
-        test_writer.add_scalar("Perplexity/test", test_perplexity)
-        test_writer.add_scalar("Accuracy/test", test_accuracy)
-        test_writer.add_scalar("Precision/test", test_precision)
-        test_writer.add_scalar("Recall/test", test_recall)
-        test_writer.add_scalar("F1/test", test_f1)
-        test_writer.add_scalar("Kappa/test", test_kappa)
-        test_writer.close()
-
-    else:
-        print("No test set available for evaluation.", flush=True)
+    world_size = torch.cuda.device_count()
+    mp.spawn(run_model,
+             args=(world_size, args, genomes),
+             nprocs=world_size,
+             join=True)
+ 
 
 if __name__ == "__main__":
     main()
