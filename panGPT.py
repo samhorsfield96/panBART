@@ -697,7 +697,8 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     val_dataset_size = len(val_loader.dataset)
 
     criterion = torch.nn.CrossEntropyLoss().to(rank) # what are we trying to optimize?
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # How are we trying to optimizer it?
+    # scale lr by number of GPUs used https://github.com/Lightning-AI/pytorch-lightning/discussions/3706#discussioncomment-3960433
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate * math.sqrt(world_size), weight_decay=weight_decay) # How are we trying to optimizer it?
     lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
 
     # Use a barrier() to make sure that process 1 loads the model after process
@@ -708,17 +709,15 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
     start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart, map_location)
 
-    if is_checkpoint_loaded:
-        logging.info("Continuing training from the loaded checkpoint.")
-    else:
-        logging.info("Starting training from scratch.")
-        start_epoch = 0
+    if rank == 0:
+        if is_checkpoint_loaded:
+            logging.info("Continuing training from the loaded checkpoint.")
+        else:
+            logging.info("Starting training from scratch.")
+    start_epoch = 0
 
-    early_stop_triggered = False
     writer = SummaryWriter(log_dir=log_dir)
     for epoch in range(start_epoch, epochs):
-        if early_stop_triggered:
-            break
         # Training model loop
         train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
         total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, train_dataset_size, epoch)
@@ -735,6 +734,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
             writer.add_scalar("Loss/train", avg_train_loss, epoch)
             writer.add_scalar("Perplexity/train", train_perplexity, epoch)
+            writer.add_scalar("Learning_rate/train", optimizer.param_groups[0]["lr"], epoch)
 
         # Validate model loop
         val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
@@ -764,6 +764,9 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         val_f1 = val_f1_tensor.item() / world_size
         val_kappa = val_kappa_tensor.item() / world_size
 
+        # step lr_scheduler, will be synchronised as same value computed across GPUs
+        lr_scheduler.step(avg_val_loss)
+
         # Log validation metrics
         if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
             logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
@@ -776,17 +779,25 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             writer.add_scalar("Kappa/val", val_kappa, epoch)
             writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
 
-            lr_scheduler.step(avg_val_loss)
             early_stopping(avg_val_loss)
-            if early_stopping.early_stop:
-                print("Early stopping triggered.", flush=True)
-                early_stop_triggered = True
-            elif avg_val_loss <= early_stopping.best_loss:
+
+            early_stop_tensor = torch.tensor(int(early_stopping.early_stop)).to(rank)
+            
+            if avg_val_loss <= early_stopping.best_loss:
                 print("Saving model checkpoint.", flush=True)
                 save_checkpoint(model, optimizer, epoch, avg_train_loss, model_save_path)
 
             gc.collect()
             writer.close()
+        elif (DDP_active and rank != 0):
+            early_stop_tensor = torch.tensor(0).to(rank)
+
+        # broadcast to all GPUs, check if early stop triggered
+        if DDP_active:
+            dist.broadcast(early_stop_tensor, src=0)
+        if early_stop_tensor.item() == 1:
+            print("Early stopping triggered.", flush=True)
+            break
 
     if len(test_genomes) > 0:
         test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
