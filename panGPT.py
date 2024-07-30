@@ -122,14 +122,13 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Train a transformer model on (pan)'omic data.")
     parser.add_argument("--input_file", type=str, required=True, help="Path to the input file")
-    #parser.add_argument("--model_type", type=str, default="transformer", choices=["transformer", "longformer", "BARTlongformer"], help="Type of model to use: 'transformer' or 'longformer'")
     parser.add_argument("--tokenizer", type=str, default="WordLevel", choices=["WordLevel", "BPE"], help="Tokeniser type to use, WordLevel or BPE")
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
     parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers")
     parser.add_argument("--max_seq_length", type=int, default=16384, help="Maximum sequence length")
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training and validation")
+    parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training and validation. This is per GPU.")
     parser.add_argument("--model_dropout_rate", type=float, default=0.2, help="Dropout rate for the model")
     parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate")
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.5, help="Factor by which the learning rate will be reduced by the learning rate scheduler")
@@ -255,7 +254,7 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
     except IOError as e:
         print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, checkpoint_path, restart, map_location):
+def load_checkpoint(model, optimizer, checkpoint_path, restart, map_location=None):
     """
     Load a model checkpoint from a file.
 
@@ -280,7 +279,10 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart, map_location):
         if restart:
             print("Restarting training, overwriting existing checkpoint.")
             return 0, False
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        if map_location != None:
+            checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        else:
+            checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
@@ -631,33 +633,24 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
 
-def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes):
-    setup(rank, world_size)
+def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, DDP_active=False):
+    if DDP_active:
+        setup(rank, world_size)
 
-    #model_type = args.model_type
-    device = args.device
     attention_window=args.attention_window
-    embed_dim = args.embed_dim
-    num_heads = args.num_heads
-    num_layers = args.num_layers
     max_seq_length = args.max_seq_length
     batch_size = args.batch_size
-    model_dropout_rate = args.model_dropout_rate
     learning_rate = args.learning_rate
     lr_scheduler_factor = args.lr_scheduler_factor
     weight_decay = args.weight_decay
     lr_patience = args.lr_patience
-    early_stop_patience =args.early_stop_patience
-    min_delta = args.min_delta
     epochs = args.epochs
     model_save_path = args.model_save_path
     tokenizer_path = args.tokenizer_path
-    train_size = args.train_size
-    val_size = args.val_size
-    seed = args.seed
     log_dir = args.log_dir
     prop_masked = args.prop_masked
     restart = args.restart
+    num_workers = args.num_workers
 
     if args.tokenizer == "BPE":
         tokenizer = LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
@@ -669,28 +662,38 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
     # determine number of GPUs to use
     #num_gpus = torch.cuda.device_count()
     model = LEDForConditionalGeneration(BARTlongformer_config)
-    if args.gradient_checkpointing == True:
+    if args.gradient_checkpointing == True and DDP_active == False:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
     
+    
     device = rank
-    num_workers = args.num_workers
+    model = model.to(device)
     logging.info(f"device = {device}")
-    model = DDP(model.to(rank), device_ids=[rank], find_unused_parameters=True)
-    print("rank: {}".format(rank))
+    if DDP_active:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        train_sampler = DistributedSampler(train_genomes, num_replicas=world_size, rank=rank, shuffle=True)
+        val_sampler = DistributedSampler(val_genomes, num_replicas=world_size, rank=rank)
+        test_sampler = DistributedSampler(test_genomes, num_replicas=world_size, rank=rank)
+        num_workers = 0
+        pin_memory = False
+        shuffle = False
+    else:
+        train_sampler, val_sampler, test_sampler = None, None, None
+        pin_memory = True
+        shuffle = True
     
     # training dataset
-    train_sampler = DistributedSampler(train_genomes, num_replicas=world_size, rank=rank)
     train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
     train_dataset.attention_window = attention_window
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, sampler=train_sampler)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=train_sampler)
     train_dataset_size = len(train_loader.dataset)
 
     # validation dataset
-    val_sampler = DistributedSampler(val_genomes, num_replicas=world_size, rank=rank)
+    
     val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
     val_dataset.attention_window = attention_window
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, sampler=val_sampler)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=val_sampler)
     val_dataset_size = len(val_loader.dataset)
 
     criterion = torch.nn.CrossEntropyLoss().to(rank) # what are we trying to optimize?
@@ -699,8 +702,10 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
 
     # Use a barrier() to make sure that process 1 loads the model after process
     # 0 saves it.
-    dist.barrier()
-    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    map_location = None
+    if DDP_active:
+        dist.barrier()
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
     start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart, map_location)
 
     if is_checkpoint_loaded:
@@ -724,7 +729,7 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
         train_perplexity = torch.exp(torch.tensor(avg_train_loss))
         
         # Log training metrics
-        if rank == 0:  # Only rank 0 should write logs
+        if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
             logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
             writer.add_scalar("Loss/train", avg_train_loss, epoch)
             writer.add_scalar("Perplexity/train", train_perplexity, epoch)
@@ -758,7 +763,7 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
         val_kappa = val_kappa_tensor.item() / world_size
 
         # Log validation metrics
-        if rank == 0:  # Only rank 0 should write logs
+        if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
             logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
             writer.add_scalar("Loss/val", avg_val_loss, epoch)
             writer.add_scalar("Perplexity/val", val_perplexity, epoch)
@@ -783,9 +788,8 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
 
     if len(test_genomes) > 0:
         test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked, args.tokenizer)
-        test_sampler = DistributedSampler(test_genomes, num_replicas=world_size, rank=rank)
         test_dataset.attention_window = attention_window
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, sampler=test_sampler)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=test_sampler)
         test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
         test_loader = tqdm(test_loader, desc="Testing", unit="batch")
         # Test Model Loop
@@ -816,7 +820,7 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
         test_kappa = test_kappa_tensor.item() / world_size
 
         # Log test metrics
-        if rank == 0:  # Only rank 0 should write logs
+        if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
             logging.info(f'Test Loss: {avg_test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}, Kappa: {test_kappa}')
             # Create a new SummaryWriter instance for test metrics
             test_writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
@@ -832,9 +836,9 @@ def run_model(rank, world_size, args, genomes, early_stopping, BARTlongformer_co
     else:
         print("No test set available for evaluation.", flush=True)
     
-    cleanup()
-
-
+    if DDP_active:
+        cleanup()
+    
 def main():
     args = parse_args()
 
@@ -950,7 +954,7 @@ def main():
             print("{} GPU(s) available, using cuda".format(world_size))
 
             device = torch.device("cuda") # Run on a GPU if one is available
-            #model = DDP(model)
+            DDP_active = True
         else:
             print("GPU not available, using cpu.")
             device = torch.device("cpu")
@@ -970,10 +974,13 @@ def main():
         val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
 
     print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
-    mp.spawn(run_model,
-             args=(world_size, args, genomes, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes),
-             nprocs=world_size,
-             join=True)
+    if DDP_active:
+        mp.spawn(run_model,
+                args=(world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, DDP_active),
+                nprocs=world_size,
+                join=True)
+    else:
+        run_model(device, 1, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes)
 
 if __name__ == "__main__":
     main()
