@@ -144,6 +144,8 @@ def parse_args():
     parser.add_argument("--val_size", type=float, default=0.1, help="Proportion of the dataset to include in the validation set")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--pe_dropout_rate", type=float, default=0.1, help="Dropout rate for positional encoding")
+    parser.add_argument("--max_input_len", type=int, default=None, help="Maximum length of input sequence. No limit if not set.")
+    parser.add_argument("--min_input_len", type=int, default=None, help="Minimum length of input sequence. No limit if not set.")
     parser.add_argument("--log_dir", type=str, default="logs", help="Directory to save TensorBoard logs")
     parser.add_argument("--device", default=None, help="GPU device number if available. If not specified, will use all available Default = None")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of threads for data loading. Default = 1")
@@ -336,7 +338,7 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, t
         #del global_attention_mask
 
         #torch.cuda.empty_cache()
-
+        
         labels = labels.to(device)
         
         loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
@@ -436,6 +438,13 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             accuracy = correct / labels.numel()
             total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
 
+            # print("loss:")
+            # print(loss.item())
+            # print("preds:")
+            # print(preds)
+            # print("labels:")
+            # print(labels)
+
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
             labels_all.extend(labels.view(-1).tolist())
@@ -481,9 +490,13 @@ class GenomeDataset(torch.utils.data.Dataset):
         if self.tokenizer_type == "BPE":
             self.mask_token = self.tokenizer.mask_token_id
             self.pad_token = self.tokenizer.pad_token_id
+            self.bos_token = self.tokenizer.bos_token
+            self.eos_token = self.tokenizer.eos_token
         else:
             self.mask_token = self.tokenizer.encode("<mask>").ids[0]
             self.pad_token = self.tokenizer.encode("<pad>").ids[0]
+            self.bos_token = self.tokenizer.encode("<s>").ids[0]
+            self.eos_token = self.tokenizer.encode("</s>").ids[0]
 
     def __len__(self):
         return len(self.texts)
@@ -498,7 +511,6 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         beginning = 0
 
-        # ensure you don't attend to <mask>, set 0 in attention_mask
         # Ensure the sequence is not longer than max_length, take random slice
         if len(input) >= self.max_length:
             # start at random point in sequence
@@ -589,10 +601,10 @@ class GenomeDataset(torch.utils.data.Dataset):
         # print(decoder_input)
         # print("decoder_attention_mask")
         # print(decoder_attention_mask.tolist())
-        #print("encoder_input")
-        #print(encoder_input)
-        #print("encoder_attention_mask")
-        #print(encoder_attention_mask.tolist())
+        # print("encoder_input")
+        # print(encoder_input)
+        # print("encoder_attention_mask")
+        # print(encoder_attention_mask.tolist())
 
         return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
 
@@ -865,6 +877,8 @@ def main():
     train_size = args.train_size
     val_size = args.val_size
     seed = args.seed
+    max_input_len = args.max_input_len
+    min_input_len = args.min_input_len
 
     # Check if max_seq_length is a multiple of attention_window when using Longformer
     #if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % attention_window != 0:
@@ -894,8 +908,16 @@ def main():
         vocab_size = min(actual_vocab_size, max_vocab_size)
     else:
         vocab_size = actual_vocab_size
-    num_sequences = len(genomes)
+    
+    # remove sequences that are too long or short
+    if max_input_len != None:
+        genomes = [genome for genome in genomes if len(genome.split()) <= max_input_len]
+
+    if min_input_len != None:
+        genomes = [genome for genome in genomes if len(genome.split()) >= min_input_len]
+    
     sequence_lengths = [len(genome.split()) for genome in genomes]
+    num_sequences = len(genomes)
     min_sequence_length = min(sequence_lengths)
     max_sequence_length = max(sequence_lengths)
     avg_sequence_length = sum(sequence_lengths) / num_sequences
@@ -914,7 +936,7 @@ def main():
             tokenizer.save_model(tokenizer_path)
         elif args.tokenizer == "WordLevel":
             tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
-            tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+            tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
             trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
             tokenizer.train_from_iterator(genomes, trainer)
             tokenizer.save(tokenizer_path)
