@@ -438,12 +438,12 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             accuracy = correct / labels.numel()
             total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
 
-            # print("loss:")
-            # print(loss.item())
-            # print("preds:")
-            # print(preds)
-            # print("labels:")
-            # print(labels)
+            print("loss:")
+            print(loss.item())
+            print("preds:")
+            print(preds)
+            print("labels:")
+            print(labels)
 
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
@@ -514,16 +514,15 @@ class GenomeDataset(torch.utils.data.Dataset):
         # Ensure the sequence is not longer than max_length, take random slice
         if len(input) >= self.max_length:
             # start at random point in sequence
-            start_index = random.randint(0, len(input) - self.max_length)
+            start_index = random.randint(1, len(input) - self.max_length)
 
             labels = input[start_index:start_index + self.max_length]
             # wrap decoder input to right
-            decoder_input = [labels[-1]]
-            decoder_input.extend(labels[:-1])
+            decoder_input = input[start_index - 1:(start_index + self.max_length) - 1]
             
             # decode to get input string, then mask and re-encode to ensure same string is learned from in decoder and encoder
             # mask will remove characters, so indexes do not map between decoder_input and encoder_input
-            text = self.tokenizer.decode(labels, skip_special_tokens=True)
+            text = self.tokenizer.decode(labels, skip_special_tokens=False)
             # print("pre-masking")
             # print(text)
             text_masked = mask_integers(text, self.prop_masked)
@@ -539,26 +538,24 @@ class GenomeDataset(torch.utils.data.Dataset):
                 else:
                     encoder_input = self.tokenizer.encode(text_masked)[1:-1]
             else:
-                if start_index == (len(input) - self.max_length - 1):
-                    encoder_input = self.tokenizer.encode(text_masked).ids
-                elif start_index == 0:
-                    encoder_input = self.tokenizer.encode(text_masked).ids
-                else:
-                    encoder_input = self.tokenizer.encode(text_masked).ids
+                encoder_input = self.tokenizer.encode(text_masked).ids
 
-            beginning = 1 if start_index == 0 else 0
+            beginning = 1 if start_index == 1 else 0
         else:
             # generate decoder and labels input, wrapping decoder input to right
-            labels = input
-            
+            labels = input[1:]
+
+            # mask original text
+            text = self.tokenizer.decode(labels, skip_special_tokens=False)
             text_masked = mask_integers(text, self.prop_masked)
+
             if self.tokenizer_type == "BPE":
                 encoder_input = self.tokenizer.encode(text_masked)
-                decoder_input = [labels[-1]]
-                decoder_input.extend(labels[:-1])
+                decoder_input = [input[-1]]
+                decoder_input.extend(input[:-1])
             else:
                 encoder_input = self.tokenizer.encode(text_masked).ids
-                decoder_input = labels[:-1]
+                decoder_input = input[:-1]
             beginning = 1
 
         len_decoder = len(decoder_input)
@@ -962,7 +959,10 @@ def main():
         max_encoder_position_embeddings=max_seq_length,
         max_decoder_position_embeddings=max_seq_length,
         dropout=model_dropout_rate,
-        attention_window = args.attention_window
+        attention_window = args.attention_window,
+        pad_token_id=tokenizer.encode("<pad>").ids[0],
+        bos_token_id=tokenizer.encode("<s>").ids[0],
+        eos_token_id=tokenizer.encode("</s>").ids[0]
         )
 
     early_stopping = EarlyStopping(patience=early_stop_patience, min_delta=min_delta, verbose=True)
