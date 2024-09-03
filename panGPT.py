@@ -441,9 +441,9 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             print("loss:")
             print(loss.item())
             print("preds:")
-            print(preds)
+            print(preds.tolist())
             print("labels:")
-            print(labels)
+            print(labels.tolist())
 
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
