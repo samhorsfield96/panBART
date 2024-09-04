@@ -225,7 +225,7 @@ def load_dataset(input_file):
             for index in range(len(genomes)):
                 split_genome = genomes[index].split(" _ ")
                 random.shuffle(split_genome)
-                genome = "<s> " + " </s> <s> ".join(split_genome) + " </s>"
+                genome = "_ " + " _ ".join(split_genome) + " _"
                 genomes[index] = genome
         return genomes
     except FileNotFoundError:
@@ -323,24 +323,18 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, t
 
     model.train()  # Set the model to training mode
     total_train_loss = 0
-    for i, (decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, beginning) in enumerate(train_loader):  # Added enumeration for clarity
-        decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
-        
-        beginning = torch.nonzero(beginning)
-
-        # set global attention for all tokens so that all positions attend to all others.
-        #global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
-        #global_attention_mask[beginning,[0]] = 1
+    for i, (decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask) in enumerate(train_loader):  # Added enumeration for clarity
+        decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
         
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits  # Generate predictions
+        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
         
         # Free GPU memory
         del encoder_input
         del encoder_attention_mask
         del decoder_input
         del decoder_attention_mask
-        #del global_attention_mask
+        del global_attention_mask
 
         #torch.cuda.empty_cache()
         
@@ -414,22 +408,17 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
     preds_all = []
     labels_all = []
     with torch.no_grad():
-        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, beginning in val_loader:  # Correctly unpack the tuples returned by the DataLoader
-            decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device)  # Move data to the appropriate device
+        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in val_loader:  # Correctly unpack the tuples returned by the DataLoader
+            decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
 
-            beginning = torch.nonzero(beginning)
-
-            #global_attention_mask = torch.zeros(decoder_input.shape, dtype=torch.long, device=decoder_input.device)
-            #global_attention_mask[beginning,[0]] = 1
-
-            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits  # Generate predictions
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
             
             # Free GPU memory
             del encoder_input
             del encoder_attention_mask
             del decoder_input
             del decoder_attention_mask
-            #del global_attention_mask
+            del global_attention_mask
 
             #torch.cuda.empty_cache()
 
@@ -573,6 +562,11 @@ class GenomeDataset(torch.utils.data.Dataset):
         encoder_attention_mask[len_masked:] = 0
         #encoder_attention_mask[mask_idx] = 0
 
+        # attend to all contig breaks
+        global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
+        break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
+        global_attention_mask[break_idx] = 1
+
         # print("labels")
         # print(len(labels))
         # print(labels)
@@ -588,8 +582,11 @@ class GenomeDataset(torch.utils.data.Dataset):
         # print("encoder_attention_mask")
         # print(len(encoder_attention_mask.tolist()))
         # print(encoder_attention_mask.tolist())
+        # print("global_attention_mask")
+        # print(len(global_attention_mask.tolist()))
+        # print(global_attention_mask.tolist())
 
-        return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, beginning
+        return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
 
 class EarlyStopping:
     """
@@ -913,7 +910,7 @@ def main():
     if not args.reuse_tokenizer:
         tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
         tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
-        trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<pad>", "<mask>"], vocab_size=vocab_size)
+        trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
         tokenizer.train_from_iterator(genomes, trainer)
         tokenizer.save(tokenizer_path)
 
