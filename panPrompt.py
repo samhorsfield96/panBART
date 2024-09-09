@@ -25,7 +25,6 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Token prediction with a Transformer or Reformer model.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
-    parser.add_argument("--tokenizer", type=str, default="WordLevel", choices=["WordLevel", "BPE"], help="Tokeniser type to use, WordLevel or BPE")
     parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
     parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for prediction.")
@@ -75,18 +74,11 @@ def pad_blocks(input_list, block_size, pad_token="<pad>"):
     return result, attention_mask
 
 # returns list first entry is encoded, second is attention mask
-def tokenize_prompt(prompt, max_seq_length, tokenizer, tokenizer_type):
-    if tokenizer_type == "BPE":
-        mask_token = tokenizer.mask_token_id
-        pad_token = tokenizer.pad_token_id
-    else:
-        mask_token = tokenizer.encode("<mask>").ids[0]
-        pad_token = tokenizer.encode("<pad>").ids[0]
+def tokenize_prompt(prompt, max_seq_length, tokenizer):
+    mask_token = tokenizer.encode("<mask>").ids[0]
+    pad_token = tokenizer.encode("<pad>").ids[0]
 
-    if tokenizer_type == "BPE":
-        encoded = tokenizer.encode(prompt)
-    else:
-        encoded = tokenizer.encode(prompt).ids
+    encoded = tokenizer.encode(prompt).ids
 
     # merge consecutive masks into single mask token
     encoder_input = ' '.join([str(i) for i in encoded])
@@ -161,10 +153,27 @@ def mask_integers(string, prop_masked):
     
     return masked_string
 
-def predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device, batch_size, temperature, DDP_active):
+def predict_next_tokens_BART(model, tokenizer, prompt, device, batch_size, temperature, prop_masked, num_seq, max_seq_length, DDP_active):
     model.eval()
 
-    output = ""
+    #TODO need to make this so that is encodes input, splits to longest lengths, then decodes, masks for encoder and takes the first character from unmasked sequence for decoder
+    encoded = tokenizer.encode(prompt).id
+
+    if prop_masked > 0:
+        prompt = mask_integers(prompt, prop_masked)
+
+    tokens, attention_mask = tokenize_prompt(prompt, max_seq_length, tokenizer)
+    #print("tokens:")
+    #print(tokens)
+    #print("mask:")
+    #print(attention_mask)
+
+    #print(tokens)
+    #print(attention_mask)
+    input_ids = [torch.tensor([input]) for input in tokens]
+    attention_mask = [torch.tensor([input], dtype=torch.long) for input in attention_mask]
+
+    output = [""] * num_seq
     num_batches = len(input_ids) // batch_size + (1 if len(input_ids) % batch_size != 0 else 0)
 
     for batch_index in range(num_batches):
@@ -172,27 +181,43 @@ def predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device
         end_index = min(start_index + batch_size, len(input_ids))
 
         # Stack input_ids and attention_mask for the current batch
-        batch_input_ids = torch.cat(input_ids[start_index:end_index], dim=0).to(device)
-        batch_attention_mask = torch.cat(attention_mask[start_index:end_index], dim=0).to(device)
+        batch_input_ids = torch.cat(input_ids[start_index:end_index], dim=0)#.to(device)
+        batch_attention_mask = torch.cat(attention_mask[start_index:end_index], dim=0)#.to(device)
 
-        # Ensure all tokens attend globally just to the first token if first batch
-        #global_attention_mask = torch.zeros(batch_input_ids.shape, dtype=torch.long, device=batch_input_ids.device)
-        #if batch_index == 0:
-            #global_attention_mask[0, 0] = 1
-        
-        #print(batch_attention_mask)
+        global_attention_mask = torch.zeros(batch_input_ids.size(), dtype=torch.long)
+        break_idx = np.array(batch_input_ids) == int(tokenizer.encode("_").ids[0])
         #print(batch_input_ids)
+        #print(break_idx.tolist())
+        #print(global_attention_mask.tolist())
+        global_attention_mask[break_idx] = 1
+        #print(global_attention_mask.tolist())
+
+        padding_index = (batch_input_ids == int(tokenizer.encode("<pad>").ids[0])).to(torch.int).argmax(dim=1).tolist()
+        #print(padding_index)
+
+        batch_input_ids, batch_attention_mask, global_attention_mask = batch_input_ids.to(device), batch_attention_mask.to(device), global_attention_mask.to(device)
+
+        # generate decoder prompt
+        #decoder_prompt = {"decoder_input_ids": torch.tensor([tokenizer.encode("<s>").ids[0]]),
+                          #"decoder_attention_mask": torch.tensor([0])}
+        #print(decoder_prompt)
 
         # Generate summaries for the current batch
         if DDP_active:
-            summary_ids = model.module.generate(
+           summary_ids = model.module.generate(
                 batch_input_ids,
-                #global_attention_mask=global_attention_mask,
+                global_attention_mask=global_attention_mask,
                 attention_mask=batch_attention_mask,
                 # is max length here correct?
                 max_length=batch_input_ids.shape[1],
                 temperature=temperature,
-                do_sample=True
+                num_beams=4,             # Beam size (the number of beams to explore)
+                #early_stopping=True,     # Stop when the first <eos> token is generated
+                num_return_sequences=num_seq,   # Number of sequences to return
+                top_p=0.1,
+                repetition_penalty=1.0,
+                do_sample=True,
+                decoder_start_token_id=batch_input_ids[0][0]
             )
         else:
             summary_ids = model.generate(
@@ -202,12 +227,22 @@ def predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device
                 # is max length here correct?
                 max_length=batch_input_ids.shape[1],
                 temperature=temperature,
-                do_sample=True
+                num_beams=4,             # Beam size (the number of beams to explore)
+                early_stopping=True,     # Stop when the first <eos> token is generated
+                num_return_sequences=num_seq,   # Number of sequences to return
+                top_p=0.1,
+                repetition_penalty=1.0,
+                do_sample=True,
+                decoder_start_token_id=batch_input_ids[0][0]
             )
 
         # Decode the generated summaries
-        for summary in summary_ids:
-            decoded = tokenizer.decode(summary.tolist(), skip_special_tokens=True)
+        for index, summary in enumerate(summary_ids):
+            #print("output:")
+            #print(summary.tolist())
+            decoded = tokenizer.decode(summary.tolist()[0: padding_index[index]], skip_special_tokens=True)
+            #print("decoded:")
+            #print(decoded)
             output += decoded
 
     return output
@@ -247,33 +282,19 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     model.load_state_dict(checkpoint["model_state_dict"])
 
     master_process = rank == 0
-    for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process):
-        if prop_masked > 0:
-            prompt = mask_integers(prompt, prop_masked)
+    for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
 
-        tokens, attention_mask = tokenize_prompt(prompt, args.max_seq_length, tokenizer, args.tokenizer)
+        predicted_text = predict_next_tokens_BART(model, tokenizer, prompt, device, args.batch_size, args.temperature, prop_masked, num_seq, DDP_active)
+        #print(predicted_text)
+        return_list.append(predicted_text)
 
-        #print(tokens)
-        #print(attention_mask)
-        input_ids = [torch.tensor([input]) for input in tokens]
-        attention_mask = [torch.tensor([input], dtype=torch.long) for input in attention_mask]
-        
-        #print(prompt)
-        for _ in range(num_seq):
-            predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device, args.batch_size, args.temperature, DDP_active)
-            #print(predicted_text)
-            return_list.append(predicted_text)
         
 def main():
     print_banner()
     args = parse_args()
 
-    if args.tokenizer == "BPE":
-        tokenizer = LEDTokenizer.from_pretrained(args.tokenizer_path, add_prefix_space=True)
-        vocab_size = tokenizer.vocab_size
-    elif args.tokenizer == "WordLevel":
-        tokenizer = Tokenizer.from_file(args.tokenizer_path)
-        vocab_size = tokenizer.get_vocab_size()
+    tokenizer = Tokenizer.from_file(args.tokenizer_path)
+    vocab_size = tokenizer.get_vocab_size()
 
     args.max_seq_length = max(args.max_seq_length, args.attention_window)
     # Round down max_seq_length to the nearest multiple of attention_window
@@ -330,7 +351,7 @@ def main():
                     join=True)
             return_list = list(mp_list)
     else:
-        query_model(args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, args.prop_masked, args.num_seq, DDP_active, return_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, args.prop_masked, args.num_seq, DDP_active, return_list)
     
     with open(args.outfile, "w") as f:
         for entry in return_list:
