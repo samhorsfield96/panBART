@@ -447,7 +447,7 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             labels = labels[mask]
 
             print("preds masked:")
-            print(pred.tolist())
+            print(preds.tolist())
             print("label masked:")
             print(labels.tolist())
 
