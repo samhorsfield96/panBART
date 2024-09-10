@@ -327,8 +327,9 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, t
         decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
         
         optimizer.zero_grad()  # Clear gradients before calculating them
-        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
-        
+        #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits  # Generate predictions
+
         # Free GPU memory
         del encoder_input
         del encoder_attention_mask
@@ -411,8 +412,9 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in val_loader:  # Correctly unpack the tuples returned by the DataLoader
             decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
 
-            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
-            
+            #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits
+
             # Free GPU memory
             del encoder_input
             del encoder_attention_mask
