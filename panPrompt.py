@@ -12,7 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from multiprocessing import Manager
 import torch.multiprocessing as mp
-from panGPT import setup, cleanup
+from panGPT import setup, cleanup, load_dataset
 
 logging.set_verbosity_error()
 
@@ -157,21 +157,34 @@ def predict_next_tokens_BART(model, tokenizer, prompt, device, batch_size, tempe
     model.eval()
 
     #TODO need to make this so that is encodes input, splits to longest lengths, then decodes, masks for encoder and takes the first character from unmasked sequence for decoder
-    encoded = tokenizer.encode(prompt).id
+    encoded = tokenizer.encode(prompt).ids
 
-    if prop_masked > 0:
-        prompt = mask_integers(prompt, prop_masked)
+    num_iters = len(encoded) // max_seq_length + (1 if len(encoded) % max_seq_length != 0 else 0)
 
-    tokens, attention_mask = tokenize_prompt(prompt, max_seq_length, tokenizer)
-    #print("tokens:")
-    #print(tokens)
-    #print("mask:")
-    #print(attention_mask)
+    encoded_blocks = []
+    for iter in range(num_iters):
+        start_index = max_seq_length * iter
+        end_index = min(start_index + max_seq_length, len(encoded))
+        encoded_blocks.append(encoded[start_index:end_index])
 
-    #print(tokens)
-    #print(attention_mask)
-    input_ids = [torch.tensor([input]) for input in tokens]
-    attention_mask = [torch.tensor([input], dtype=torch.long) for input in attention_mask]
+    decoder_input = []
+    input_ids = []
+    attention_mask = []
+    for element in encoded_blocks:
+        decoder_input.append(element[0])
+        decoded = tokenizer.decode(element, skip_special_tokens=False)
+        #print(decoded)
+        if prop_masked > 0:
+            decoded = mask_integers(decoded, prop_masked)
+        tokens, mask = tokenize_prompt(decoded, max_seq_length, tokenizer)
+
+        # print("tokens:")
+        # print(tokens)
+        # print("mask:")
+        # print(mask)
+
+        input_ids.append(torch.tensor([tokens[0]]))
+        attention_mask.append(torch.tensor([mask[0]], dtype=torch.long))
 
     output = [""] * num_seq
     num_batches = len(input_ids) // batch_size + (1 if len(input_ids) % batch_size != 0 else 0)
@@ -183,16 +196,17 @@ def predict_next_tokens_BART(model, tokenizer, prompt, device, batch_size, tempe
         # Stack input_ids and attention_mask for the current batch
         batch_input_ids = torch.cat(input_ids[start_index:end_index], dim=0)#.to(device)
         batch_attention_mask = torch.cat(attention_mask[start_index:end_index], dim=0)#.to(device)
+        batch_decoder_input = decoder_input[start_index:end_index]
 
         global_attention_mask = torch.zeros(batch_input_ids.size(), dtype=torch.long)
         break_idx = np.array(batch_input_ids) == int(tokenizer.encode("_").ids[0])
         #print(batch_input_ids)
-        #print(break_idx.tolist())
-        #print(global_attention_mask.tolist())
+        # print(break_idx.tolist())
+        # print(global_attention_mask.tolist())
         global_attention_mask[break_idx] = 1
-        #print(global_attention_mask.tolist())
+        # print(global_attention_mask.tolist())
 
-        padding_index = (batch_input_ids == int(tokenizer.encode("<pad>").ids[0])).to(torch.int).argmax(dim=1).tolist()
+        #padding_index = (batch_input_ids == int(tokenizer.encode("<pad>").ids[0])).to(torch.int).argmax(dim=1).tolist()
         #print(padding_index)
 
         batch_input_ids, batch_attention_mask, global_attention_mask = batch_input_ids.to(device), batch_attention_mask.to(device), global_attention_mask.to(device)
@@ -217,7 +231,7 @@ def predict_next_tokens_BART(model, tokenizer, prompt, device, batch_size, tempe
                 top_p=0.1,
                 repetition_penalty=1.0,
                 do_sample=True,
-                decoder_start_token_id=batch_input_ids[0][0]
+                decoder_start_token_id=batch_decoder_input
             )
         else:
             summary_ids = model.generate(
@@ -233,17 +247,33 @@ def predict_next_tokens_BART(model, tokenizer, prompt, device, batch_size, tempe
                 top_p=0.1,
                 repetition_penalty=1.0,
                 do_sample=True,
-                decoder_start_token_id=batch_input_ids[0][0]
+                decoder_start_token_id=batch_decoder_input
             )
 
         # Decode the generated summaries
         for index, summary in enumerate(summary_ids):
-            #print("output:")
-            #print(summary.tolist())
-            decoded = tokenizer.decode(summary.tolist()[0: padding_index[index]], skip_special_tokens=True)
+            print("prompt: ")
+            print(encoded_blocks[index])
+            #print("input: ")
+            #print(batch_input_ids[index].tolist())
+            print("output:")
+            print(summary.tolist()[0: len(encoded_blocks[index])])
+            
+            output = summary.tolist()[0: len(encoded_blocks[index])]
+            comparison = []
+            for index2, element in enumerate(encoded_blocks[index]):
+                if element == output[index2]:
+                    comparison.append(1)
+                else:
+                    comparison.append(0)
+            print(comparison)
+            print("matches: {}/{}".format(sum(comparison), len(output)))
+
+            decoded = tokenizer.decode(output, skip_special_tokens=True)
             #print("decoded:")
             #print(decoded)
-            output += decoded
+            output[index] += decoded
+            fail
 
     return output
 
@@ -259,7 +289,7 @@ def split_prompts(prompts, world_size):
     chunk_size = len(prompts) // world_size
     return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, prop_masked, num_seq, DDP_active, return_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, return_list):
     if DDP_active:
         setup(rank, world_size)
         prompt_list = prompt_list[rank]
@@ -284,7 +314,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     master_process = rank == 0
     for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
 
-        predicted_text = predict_next_tokens_BART(model, tokenizer, prompt, device, args.batch_size, args.temperature, prop_masked, num_seq, DDP_active)
+        predicted_text = predict_next_tokens_BART(model, tokenizer, prompt, device, args.batch_size, args.temperature, args.prop_masked, args.num_seq, args.max_seq_length, DDP_active)
         #print(predicted_text)
         return_list.append(predicted_text)
 
@@ -337,7 +367,7 @@ def main():
         else:
             device = torch.device("cpu")
 
-    prompt_list = read_prompt_file(args.prompt_file)
+    prompt_list = load_dataset(args.prompt_file)
     #if args.model_type == "BARTlongformer":
 
     return_list = []
@@ -346,12 +376,12 @@ def main():
         with Manager() as manager:
             mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, args.prop_masked, args.num_seq, DDP_active, mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, mp_list),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, args.prop_masked, args.num_seq, DDP_active, return_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, return_list)
     
     with open(args.outfile, "w") as f:
         for entry in return_list:
