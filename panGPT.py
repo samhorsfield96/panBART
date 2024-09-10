@@ -439,6 +439,16 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             print("labels:")
             print(labels.tolist())
 
+            # ignore padding positions
+            mask = labels != -100
+            preds = preds[mask]
+            labels = labels[mask]
+
+            print("preds masked:")
+            print(pred.tolist())
+            print("label masked:")
+            print(labels.tolist())
+
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
             labels_all.extend(labels.view(-1).tolist())
