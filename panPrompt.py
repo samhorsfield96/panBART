@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
     parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
     parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
-    parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for prediction.")
+    parser.add_argument("--temperature", type=float, default=None, help="Temperature for prediction. if unset, will take most likely value.")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
     parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
@@ -202,132 +202,100 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
         attention_window = attention_window
         )
     model = LEDForConditionalGeneration(BARTlongformer_config)
-    model.config.use_cache = True
+    #model.config.use_cache = True
     return model
 
 def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_size, temperature, prop_masked, num_seq, max_seq_length, DDP_active):
     model.eval()
-    criterion = torch.nn.CrossEntropyLoss().to(device)
-    vocab_size = tokenizer.get_vocab_size()
-    pad_token = tokenizer.encode("<pad>").ids[0]
 
-    generate = False
-
-    total_val_loss = 0
-    total_accuracy = 0
-    preds_all = []
-    labels_all = []
     predictions = []
+    accuracy_list = []
     with torch.no_grad():
-        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
-  
-            total_len = encoder_input.size(1)
-            current_sequence = []
-            for i in range(0, total_len, max_seq_length):
-                # print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
+        # repeat for number of sequences required. Means each sequences is masked in different ways
+        for _ in range(num_seq):
+            for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
+    
+                total_len = encoder_input.size(1)
+                current_sequence = []
+                current_accuracy_list = []
+                for i in range(0, total_len, max_seq_length):
+                    # print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
 
-                batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                    batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
 
-                # if generate == True:
-                #     preds = batch_decoder_input[:, 0].tolist()
-                #     for j in range(batch_encoder_input.shape[1]):
-                #         tokens = torch.tensor([preds]).to(device)
-                #         outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=tokens, global_attention_mask=batch_global_attention_mask).logits
-                #         scaled_logits = outputs[0, j, :] / temperature
-                #         probabilities = F.softmax(scaled_logits, dim=-1)
-                #         next_token_id = torch.multinomial(probabilities, 1).item()
-                #         #print(next_token_id)
-                #         preds.append(next_token_id)
-                #     print(preds)
-                #     preds = torch.tensor([preds]).to(device)
+                    # generated iteratively (very slow)
+                    # if generate == True:
+                    #     preds = batch_decoder_input[:, 0].tolist()
+                    #     for j in range(batch_encoder_input.shape[1]):
+                    #         tokens = torch.tensor([preds]).to(device)
+                    #         outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=tokens, global_attention_mask=batch_global_attention_mask).logits
+                    #         scaled_logits = outputs[0, j, :] / temperature
+                    #         probabilities = F.softmax(scaled_logits, dim=-1)
+                    #         next_token_id = torch.multinomial(probabilities, 1).item()
+                    #         #print(next_token_id)
+                    #         preds.append(next_token_id)
+                    #     print(preds)
+                    #     preds = torch.tensor([preds]).to(device)
 
-                #     batch_labels = labels[:, i:i + max_seq_length].to(device)
+                    outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
 
-                #     # ignore padding positions
-                #     mask = batch_labels != -100
-                #     preds = preds[mask[0]]
-                #     batch_labels = batch_labels[mask]
+                    # Free GPU memory
+                    del encoder_input
+                    del encoder_attention_mask
+                    del decoder_input
+                    del decoder_attention_mask
+                    del global_attention_mask
 
-                #     # calculate accuracy
-                #     correct = (preds[1:] == batch_labels[:-1]).sum().item()
-                #     accuracy = correct / batch_labels[:-1].numel()
-                #     total_accuracy += accuracy * batch_labels[:-1].size(0)  # Accumulate the accuracy
+                    #torch.cuda.empty_cache()
 
-                #     print("accuracy:")
-                #     print(accuracy)
-                #     print("preds:")
-                #     print(preds[1:].tolist())
-                #     print("labels:")
-                #     print(batch_labels[:-1].tolist())
-                #     print("matches:")
-                #     print((preds[1:] == batch_labels[:-1]).type(torch.uint8).tolist())
+                    batch_labels = labels[:, i:i + max_seq_length].to(device)
 
-                #     current_sequence.append(preds)
+                    if temperature != None:
+                        # generate predictions with Temperature
+                        scaled_logits = outputs / temperature
+                        probabilities = F.softmax(scaled_logits, dim=2)
+                        preds = torch.multinomial(probabilities.view(-1, probabilities.size(-1)), 1)
+                        # Reshape the sampled token IDs to match the batch size and sequence length
+                        preds = preds.view(outputs.size(0), outputs.size(1))
+                    else:
+                    # take highest value
+                        preds = outputs.argmax(dim=-1)  # Get predicted classes
 
-                    # decoded = tokenizer.decode(summary.tolist()[0: len(encoded_blocks[index])], skip_special_tokens=True)
-                    # #print("decoded:")
-                    # #print(decoded)
-                    # output_seqs[index] += decoded
+                    # ignore padding positions
+                    mask = batch_labels != -100
+                    preds = preds[mask]
+                    batch_labels = batch_labels[mask]
 
-                outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
-                #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits
+                    # calculate accuracy
+                    correct = (preds == batch_labels).sum().item()
+                    accuracy = correct / batch_labels.numel()
 
-                # Free GPU memory
-                del encoder_input
-                del encoder_attention_mask
-                del decoder_input
-                del decoder_attention_mask
-                del global_attention_mask
+                    current_accuracy_list.append(accuracy)
+                    print("accuracy: {}".format(round(accuracy, 4)))
+                    #print("loss: {}".format(loss.item()))
+                    print("preds:")
+                    print(preds.tolist())
+                    print("labels:")
+                    print(batch_labels.tolist())
+                    print("matches:")
+                    print((preds == batch_labels).type(torch.uint8).tolist())
 
-                #torch.cuda.empty_cache()
+                    current_sequence.append(preds)
+            
+                # concatenate predictions and get average accuracy
+                current_accuracy = sum(current_accuracy_list) / len(current_accuracy_list)
+                #print("accuracy: {}".format(round(current_accuracy, 4)))
+                accuracy_list.append(current_accuracy)
+                current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
+                sequence = torch.cat(current_sequence, dim=1).tolist()[0]
+                #print(sequence)
+                predictions.append(sequence)
 
-                batch_labels = labels[:, i:i + max_seq_length].to(device)
-                
-                loss = criterion(outputs.view(-1, vocab_size), batch_labels.view(-1))
-                total_val_loss += loss.item() * batch_labels.size(0)  # Accumulate the loss
+    predictions = [tokenizer.decode(seq, skip_special_tokens=False) for seq in predictions]
+    
+    return_list = [(acc, seq) for acc, seq in zip(accuracy_list, predictions)]
 
-                if temperature != None:
-                    # generate predictions with Temperature
-                    scaled_logits = outputs / temperature
-                    probabilities = F.softmax(scaled_logits, dim=2)
-                    preds = torch.multinomial(probabilities.view(-1, probabilities.size(-1)), 1)
-                    # Reshape the sampled token IDs to match the batch size and sequence length
-                    preds = preds.view(outputs.size(0), outputs.size(1))
-                else:
-                # take highest value
-                    preds = outputs.argmax(dim=-1)  # Get predicted classes
-
-                # ignore padding positions
-                mask = batch_labels != -100
-                preds = preds[mask]
-                batch_labels = batch_labels[mask]
-
-                # calculate accuracy
-                correct = (preds == batch_labels).sum().item()
-                accuracy = correct / batch_labels.numel()
-                total_accuracy += accuracy * batch_labels.size(0)  # Accumulate the accuracy
-
-                print("accuracy:")
-                print(accuracy)
-                print("loss:")
-                print(loss.item())
-                # print("preds:")
-                # print(preds.tolist())
-                # print("labels:")
-                # print(batch_labels.tolist())
-                # print("matches:")
-                # print((preds == batch_labels).type(torch.uint8).tolist())
-
-                #print(preds)
-                current_sequence.append(preds)
-        
-            # concatenate predictions
-            current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
-            sequence = torch.cat(current_sequence, dim=1)
-            predictions.append(sequence)
-            #print(predictions)
-
-    return predictions
+    return return_list
 
 def read_prompt_file(file_path):
     prompt_list = []
@@ -345,14 +313,14 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     if DDP_active:
         setup(rank, world_size)
         #prompt_list = prompt_list[rank]
-        sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=True)
+        sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
         num_workers = 0
         pin_memory = False
         shuffle = False
     else:
         sampler = None
         pin_memory = True
-        shuffle = True
+        shuffle = False
         num_workers=1
     
     dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked)
@@ -381,8 +349,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     #for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
 
     predicted_text = predict_next_tokens_BART(model, tokenizer, prompt_list[0], loader, device, args.batch_size, args.temperature, args.prop_masked, args.num_seq, args.max_seq_length, DDP_active)
-    #print(predicted_text)
-    return_list.append(predicted_text)
+    return_list.extend(predicted_text)
 
         
 def main():
@@ -460,8 +427,8 @@ def main():
         query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, return_list)
     
     with open(args.outfile, "w") as f:
-        for entry in return_list:
-            f.write(entry + "\n")
+        for index, (acc, seq) in enumerate(return_list):
+            f.write(">" + str(index) + " accuracy: " + str(acc) + "\n" + str(seq) + "\n")
 
     if DDP_active:
         cleanup()
