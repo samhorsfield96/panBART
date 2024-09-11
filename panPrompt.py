@@ -291,7 +291,7 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
                 #print(sequence)
                 predictions.append(sequence)
 
-    predictions = [tokenizer.decode(seq, skip_special_tokens=False) for seq in predictions]
+    predictions = [tokenizer.decode(seq, skip_special_tokens=True) for seq in predictions]
     
     return_list = [(acc, seq) for acc, seq in zip(accuracy_list, predictions)]
 
