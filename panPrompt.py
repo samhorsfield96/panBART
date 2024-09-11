@@ -13,6 +13,9 @@ import torch.distributed as dist
 from multiprocessing import Manager
 import torch.multiprocessing as mp
 from panGPT import setup, cleanup, load_dataset
+import random
+from panGPT import GenomeDataset
+from torch.utils.data import DataLoader, DistributedSampler
 
 logging.set_verbosity_error()
 
@@ -158,13 +161,71 @@ def mask_integers(string, prop_masked):
     
     return masked_string
 
-def predict_next_tokens_BART(model, tokenizer, prompt, device, batch_size, temperature, prop_masked, num_seq, max_seq_length, DDP_active):
+def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_size, temperature, prop_masked, num_seq, max_seq_length, DDP_active):
     model.eval()
-
+    criterion = torch.nn.CrossEntropyLoss().to(device)
     vocab_size = tokenizer.get_vocab_size()
     pad_token = tokenizer.encode("<pad>").ids[0]
 
-    criterion = torch.nn.CrossEntropyLoss().to(device)
+    total_val_loss = 0
+    total_accuracy = 0
+    preds_all = []
+    labels_all = []
+    with torch.no_grad():
+        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
+            decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
+
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+            #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits
+
+            # Free GPU memory
+            del encoder_input
+            del encoder_attention_mask
+            del decoder_input
+            del decoder_attention_mask
+            del global_attention_mask
+
+            #torch.cuda.empty_cache()
+
+            labels = labels.to(device)
+            
+            loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
+            total_val_loss += loss.item() * labels.size(0)  # Accumulate the loss
+
+            preds = outputs.argmax(dim=-1)  # Get predicted classes
+
+            # ignore padding positions
+            mask = labels != -100
+            preds = preds[mask]
+            labels = labels[mask]
+
+            # calculate accuracy
+            correct = (preds == labels).sum().item()
+            accuracy = correct / labels.numel()
+            total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
+
+            print("accuracy:")
+            print(accuracy)
+            print("loss:")
+            print(loss.item())
+            print("preds:")
+            print(preds.tolist())
+            print("labels:")
+            print(labels.tolist())
+            print("matches:")
+            print((preds == labels).type(torch.uint8).tolist())
+
+            #print("preds masked:")
+            #print(preds.tolist())
+            #print("label masked:")
+            #print(labels.tolist())
+
+            # Collect predictions and labels for calculating additional metrics
+            preds_all.extend(preds.view(-1).tolist())
+            labels_all.extend(labels.view(-1).tolist())
+            # Update the progress bar
+            #loader.update(1)
+            fail
 
     #TODO need to make this so that is encodes input, splits to longest lengths, then decodes, masks for encoder and takes the first character from unmasked sequence for decoder
     encoded = tokenizer.encode(prompt).ids
@@ -350,7 +411,21 @@ def split_prompts(prompts, world_size):
 def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, return_list):
     if DDP_active:
         setup(rank, world_size)
-        prompt_list = prompt_list[rank]
+        #prompt_list = prompt_list[rank]
+        sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=True)
+        num_workers = 0
+        pin_memory = False
+        shuffle = False
+    else:
+        sampler = None
+        pin_memory = True
+        shuffle = True
+        num_workers=1
+    
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked)
+    dataset.attention_window = args.attention_window
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
+    dataset_size = len(loader.dataset)
     
     model = LEDForConditionalGeneration(BARTlongformer_config)
     device = rank
@@ -370,11 +445,11 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     model.load_state_dict(checkpoint["model_state_dict"])
 
     master_process = rank == 0
-    for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
+    #for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
 
-        predicted_text = predict_next_tokens_BART(model, tokenizer, prompt, device, args.batch_size, args.temperature, args.prop_masked, args.num_seq, args.max_seq_length, DDP_active)
-        #print(predicted_text)
-        return_list.append(predicted_text)
+    predicted_text = predict_next_tokens_BART(model, tokenizer, prompt_list[0], loader, device, args.batch_size, args.temperature, args.prop_masked, args.num_seq, args.max_seq_length, DDP_active)
+    #print(predicted_text)
+    return_list.append(predicted_text)
 
         
 def main():
