@@ -210,6 +210,8 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
     vocab_size = tokenizer.get_vocab_size()
     pad_token = tokenizer.encode("<pad>").ids[0]
 
+    generate = False
+
     total_val_loss = 0
     total_accuracy = 0
     preds_all = []
@@ -219,230 +221,130 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
   
             total_len = encoder_input.size(1)
-            print(total_len)
             current_sequence = []
             for i in range(0, total_len, max_seq_length):
                 print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
 
                 batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
 
-                outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
-                #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits
+                if generate == True:
+                    if DDP_active:
+                        summary_ids = model.module.generate(
+                            batch_encoder_input,
+                            global_attention_mask=batch_global_attention_mask,
+                            attention_mask=batch_encoder_attention_mask,
+                            # # is max length here correct?
+                            max_length=batch_encoder_input.shape[1],
+                            temperature=1.0,
+                            #num_beams=4,             # Beam size (the number of beams to explore)
+                            #early_stopping=True,     # Stop when the first <eos> token is generated
+                            num_return_sequences=num_seq,   # Number of sequences to return
+                            #top_p=0.9,
+                            #repetition_penalty=1.0,
+                            do_sample=True,
+                            decoder_start_token_id=batch_decoder_input[:, 0]
+                        )
+                    else:
+                        summary_ids = model.generate(
+                            batch_encoder_input,
+                            global_attention_mask=batch_global_attention_mask,
+                            attention_mask=batch_encoder_attention_mask,
+                            # # is max length here correct?
+                            max_length=batch_encoder_input.shape[1],
+                            temperature=1.0,
+                            #num_beams=4,             # Beam size (the number of beams to explore)
+                            #early_stopping=True,     # Stop when the first <eos> token is generated
+                            num_return_sequences=num_seq,   # Number of sequences to return
+                            #top_p=0.9,
+                            #repetition_penalty=1.0,
+                            do_sample=True,
+                            decoder_start_token_id=batch_decoder_input[:, 0]
+                        )
 
-                # Free GPU memory
-                del encoder_input
-                del encoder_attention_mask
-                del decoder_input
-                del decoder_attention_mask
-                del global_attention_mask
+                    batch_labels = labels[:, i:i + max_seq_length].to(device)
 
-                #torch.cuda.empty_cache()
+                    # Decode the generated summaries
+                    for index, preds in enumerate(summary_ids):
 
-                batch_labels = labels[:, i:i + max_seq_length].to(device)
-                
-                loss = criterion(outputs.view(-1, vocab_size), batch_labels.view(-1))
-                total_val_loss += loss.item() * batch_labels.size(0)  # Accumulate the loss
+                        # ignore padding positions
+                        mask = batch_labels != -100
+                        preds = preds[mask[0]]
+                        batch_labels = batch_labels[mask]
 
-                preds = outputs.argmax(dim=-1)  # Get predicted classes
+                        # calculate accuracy
+                        correct = (preds[1:] == batch_labels[:-1]).sum().item()
+                        accuracy = correct / batch_labels[:-1].numel()
+                        total_accuracy += accuracy * batch_labels[:-1].size(0)  # Accumulate the accuracy
 
-                # ignore padding positions
-                mask = batch_labels != -100
-                preds = preds[mask]
-                batch_labels = batch_labels[mask]
+                        print("accuracy:")
+                        print(accuracy)
+                        print("preds:")
+                        print(preds[1:].tolist())
+                        print("labels:")
+                        print(batch_labels[:-1].tolist())
+                        print("matches:")
+                        print((preds[1:] == batch_labels[:-1]).type(torch.uint8).tolist())
 
-                # calculate accuracy
-                correct = (preds == batch_labels).sum().item()
-                accuracy = correct / batch_labels.numel()
-                total_accuracy += accuracy * batch_labels.size(0)  # Accumulate the accuracy
+                        current_sequence.append(preds)
+                        
+                        fail
 
-                print("accuracy:")
-                print(accuracy)
-                print("loss:")
-                print(loss.item())
-                # print("preds:")
-                # print(preds.tolist())
-                # print("labels:")
-                # print(batch_labels.tolist())
-                print("matches:")
-                print((preds == batch_labels).type(torch.uint8).tolist())
+                    # decoded = tokenizer.decode(summary.tolist()[0: len(encoded_blocks[index])], skip_special_tokens=True)
+                    # #print("decoded:")
+                    # #print(decoded)
+                    # output_seqs[index] += decoded
 
-                print(preds)
-                current_sequence.append(preds)
-            
-            # concatenate predictions
-            current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
-            sequence = torch.cat(current_sequence, dim=1)
-            predictions.append(sequence)
-        print(predictions)
-
-    #TODO need to make this so that is encodes input, splits to longest lengths, then decodes, masks for encoder and takes the first character from unmasked sequence for decoder
-    encoded = tokenizer.encode(prompt).ids
-
-    num_iters = len(encoded) // max_seq_length + (1 if len(encoded) % max_seq_length != 0 else 0)
-
-    encoded_blocks = []
-    decoder_blocks = []
-    decoder_input = []
-    for iter in range(num_iters):
-        start_index = (max_seq_length * iter) + 1
-        end_index = min(start_index + max_seq_length, len(encoded))
-        decoder_input.append(encoded[start_index])
-        encoded_blocks.append(encoded[start_index:end_index])
-        decoder_blocks.append(encoded[start_index - 1:end_index - 1])
-
-    #print("encoded_blocks:")
-    #print(encoded_blocks)
-    #print("decoder_blocks:")
-    #print(decoder_blocks)
-
-    labels = []
-    encoder_input_ids = []
-    encoder_attention_mask = []
-    for element in encoded_blocks:
-        decoded = tokenizer.decode(element, skip_special_tokens=False)
-        #print(decoded)
-        if prop_masked > 0:
-            decoded = mask_integers(decoded, prop_masked)
-        tokens, mask = tokenize_prompt(decoded, max_seq_length, tokenizer)
-
-        # print("tokens:")
-        # print(tokens)
-        # print("mask:")
-        # print(mask)
-        padded_labels, label_mask = pad_blocks(element, max_seq_length, pad_token, True)
-
-        labels.append(torch.tensor([padded_labels]))
-        encoder_input_ids.append(torch.tensor([tokens[0]]))
-        encoder_attention_mask.append(torch.tensor([mask[0]], dtype=torch.long))
-
-    decoder_input_ids = []
-    decoder_attention_mask = []
-    for element in decoder_blocks:
-        tokens, mask = pad_blocks(element, max_seq_length, pad_token)
-        decoder_input_ids.append(torch.tensor([tokens[0]]))
-        decoder_attention_mask.append(torch.tensor([mask[0]], dtype=torch.long))
-
-    output_seqs = [""] * num_seq
-    num_batches = len(encoder_input_ids) // batch_size + (1 if len(encoder_input_ids) % batch_size != 0 else 0)
-
-    #print("labels:")
-    #print(labels[0].tolist())
-    # print("encoder_input_ids:")
-    # print(encoder_input_ids[0].tolist())
-    # print("encoder_attention_mask:")
-    # print(encoder_attention_mask[0].tolist())
-    # print("decoder_input_ids:")
-    # print(decoder_input_ids[0].tolist())
-    # print("decoder_attention_mask:")
-    # print(decoder_attention_mask[0].tolist())
-
-    for batch_index in range(num_batches):
-        start_index = batch_index * batch_size
-        end_index = min(start_index + batch_size, len(encoder_input_ids))
-
-        # Stack input_ids and attention_mask for the current batch
-        batch_labels = torch.cat(labels[start_index:end_index], dim=0)
-        batch_encoder_input_ids = torch.cat(encoder_input_ids[start_index:end_index], dim=0)#.to(device)
-        batch_encoder_attention_mask = torch.cat(encoder_attention_mask[start_index:end_index], dim=0)#.to(device)
-
-        batch_decoder_input_ids = torch.cat(encoder_input_ids[start_index:end_index], dim=0)#.to(device)
-        batch_decoder_attention_mask = torch.cat(decoder_attention_mask[start_index:end_index], dim=0)#.to(device)
-
-        global_attention_mask = torch.zeros(batch_encoder_input_ids.size(), dtype=torch.long)
-        break_idx = np.array(batch_encoder_input_ids) == int(tokenizer.encode("_").ids[0])
-        #print(batch_input_ids)
-        # print(break_idx.tolist())
-        # print(global_attention_mask.tolist())
-        global_attention_mask[break_idx] = 1
-        # print(global_attention_mask.tolist())
-
-        batch_encoder_input_ids, batch_encoder_attention_mask, batch_decoder_input_ids, batch_decoder_attention_mask, global_attention_mask = batch_encoder_input_ids.to(device), batch_encoder_attention_mask.to(device), batch_decoder_input_ids.to(device), batch_decoder_attention_mask.to(device), global_attention_mask.to(device)
-
-        outputs = model(input_ids=batch_encoder_input_ids, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input_ids, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=global_attention_mask).logits
-        
-        batch_labels = batch_labels.to(device)
-        loss = criterion(outputs.view(-1, vocab_size), batch_labels.view(-1))
-
-        preds = outputs.argmax(dim=-1)
-
-        # ignore padding positions
-        mask = batch_labels != -100
-        #print(mask[0].tolist())
-        preds = preds[mask[0]]
-        batch_labels = batch_labels[mask]
-
-        print("loss:")
-        print(loss.item())
-        print("preds:")
-        print(preds.tolist())
-        print("labels:")
-        print(batch_labels.tolist())
-
-        correct = (preds == batch_labels).sum().item()
-        accuracy = correct / batch_labels.numel()
-        print("accuracy: {}".format(accuracy))
-
-        fail
-
-        # Generate summaries for the current batch
-        if DDP_active:
-           summary_ids = model.module.generate(
-                batch_encoder_input_ids,
-                global_attention_mask=global_attention_mask,
-                attention_mask=batch_attention_mask,
-                # is max length here correct?
-                max_length=batch_encoder_input_ids.shape[1],
-                temperature=temperature,
-                num_beams=4,             # Beam size (the number of beams to explore)
-                #early_stopping=True,     # Stop when the first <eos> token is generated
-                num_return_sequences=num_seq,   # Number of sequences to return
-                #top_p=0.9,
-                #repetition_penalty=1.0,
-                #do_sample=True,
-                decoder_start_token_id=batch_decoder_input
-            )
-        else:
-            summary_ids = model.generate(
-                batch_encoder_input_ids,
-                global_attention_mask=global_attention_mask,
-                attention_mask=batch_attention_mask,
-                # # is max length here correct?
-                max_length=batch_encoder_input_ids.shape[1],
-                temperature=temperature,
-                #num_beams=4,             # Beam size (the number of beams to explore)
-                #early_stopping=True,     # Stop when the first <eos> token is generated
-                num_return_sequences=num_seq,   # Number of sequences to return
-                top_p=0.9,
-                repetition_penalty=1.0,
-                do_sample=True,
-                decoder_start_token_id=batch_decoder_input
-            )
-
-        # Decode the generated summaries
-        for index, summary in enumerate(summary_ids):
-            print("prompt: ")
-            print(encoded_blocks[index])
-            #print("input: ")
-            #print(batch_input_ids[index].tolist())
-            output = summary.tolist()[1: len(encoded_blocks[index]) + 1]
-            print("output:")
-            print(output)
-            
-            comparison = []
-            for index2, element in enumerate(encoded_blocks[index]):
-                if element == output[index2]:
-                    comparison.append(1)
                 else:
-                    comparison.append(0)
-            print(comparison)
-            print("matches: {}/{}".format(sum(comparison), len(output)))
+                    outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                    #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits
 
-            decoded = tokenizer.decode(summary.tolist()[0: len(encoded_blocks[index])], skip_special_tokens=True)
-            #print("decoded:")
-            #print(decoded)
-            output_seqs[index] += decoded
+                    # Free GPU memory
+                    del encoder_input
+                    del encoder_attention_mask
+                    del decoder_input
+                    del decoder_attention_mask
+                    del global_attention_mask
 
-    return output
+                    #torch.cuda.empty_cache()
+
+                    batch_labels = labels[:, i:i + max_seq_length].to(device)
+                    
+                    loss = criterion(outputs.view(-1, vocab_size), batch_labels.view(-1))
+                    total_val_loss += loss.item() * batch_labels.size(0)  # Accumulate the loss
+
+                    preds = outputs.argmax(dim=-1)  # Get predicted classes
+
+                    # ignore padding positions
+                    mask = batch_labels != -100
+                    preds = preds[mask]
+                    batch_labels = batch_labels[mask]
+
+                    # calculate accuracy
+                    correct = (preds == batch_labels).sum().item()
+                    accuracy = correct / batch_labels.numel()
+                    total_accuracy += accuracy * batch_labels.size(0)  # Accumulate the accuracy
+
+                    print("accuracy:")
+                    print(accuracy)
+                    print("loss:")
+                    print(loss.item())
+                    # print("preds:")
+                    # print(preds.tolist())
+                    # print("labels:")
+                    # print(batch_labels.tolist())
+                    print("matches:")
+                    print((preds == batch_labels).type(torch.uint8).tolist())
+
+                    print(preds)
+                    current_sequence.append(preds)
+            
+                # concatenate predictions
+                current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
+                sequence = torch.cat(current_sequence, dim=1)
+                predictions.append(sequence)
+            print(predictions)
+
+    return predictions
 
 def read_prompt_file(file_path):
     prompt_list = []
