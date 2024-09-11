@@ -430,6 +430,13 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             total_val_loss += loss.item() * labels.size(0)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
+
+            # ignore padding positions
+            mask = labels != -100
+            preds = preds[mask]
+            labels = labels[mask]
+
+            # calculate accuracy
             correct = (preds == labels).sum().item()
             accuracy = correct / labels.numel()
             total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
@@ -441,15 +448,10 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             print("labels:")
             print(labels.tolist())
 
-            # ignore padding positions
-            mask = labels != -100
-            preds = preds[mask]
-            labels = labels[mask]
-
-            print("preds masked:")
-            print(preds.tolist())
-            print("label masked:")
-            print(labels.tolist())
+            #print("preds masked:")
+            #print(preds.tolist())
+            #print("label masked:")
+            #print(labels.tolist())
 
             # Collect predictions and labels for calculating additional metrics
             preds_all.extend(preds.view(-1).tolist())
@@ -692,7 +694,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=val_sampler)
     val_dataset_size = len(val_loader.dataset)
 
-    criterion = torch.nn.CrossEntropyLoss().to(rank) # what are we trying to optimize?
+    criterion = torch.nn.CrossEntropyLoss().to(device) # what are we trying to optimize?
     # scale lr by number of GPUs used https://github.com/Lightning-AI/pytorch-lightning/discussions/3706#discussioncomment-3960433
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate * math.sqrt(world_size), weight_decay=weight_decay) # How are we trying to optimizer it?
     lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
