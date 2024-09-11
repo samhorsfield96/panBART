@@ -358,32 +358,6 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, t
     #avg_train_loss = total_train_loss / train_dataset_size
     return total_train_loss
 
-def calculate_metrics(preds, labels):
-    """
-    Calculate evaluation metrics for model predictions.
-
-    Args:
-    - preds (Tensor): Predicted labels.
-    - labels (Tensor): True labels.
-
-    Returns:
-    - tuple: Tuple containing evaluation metrics (accuracy, precision, recall, F1 score, Cohen's kappa).
-
-    This function calculates various evaluation metrics (accuracy, precision, recall, F1 score, Cohen's kappa)
-    based on the predicted labels and true labels, and returns them as a tuple.
-    """
-
-    preds = preds.view(-1)
-    labels = labels.view(-1)
-    if torch.unique(preds).size(0) == 1:
-        warnings.warn("All predicted labels are the same. The model might not be learning properly.")
-    accuracy = accuracy_score(labels.cpu().numpy(), preds.cpu().numpy())
-    precision = precision_score(labels.cpu().numpy(), preds.cpu().numpy(), average="weighted", zero_division=0)
-    recall = recall_score(labels.cpu().numpy(), preds.cpu().numpy(), average="weighted", zero_division=0)
-    f1 = f1_score(labels.cpu().numpy(), preds.cpu().numpy(), average="weighted", zero_division=0)
-    kappa = cohen_kappa_score(labels.cpu().numpy(), preds.cpu().numpy())
-    return accuracy, precision, recall, f1, kappa
-
 def validate_model(val_loader, model, criterion, device, vocab_size, dataset_size, epoch=None):
     """
     Validate the transformer model on the validation dataset.
