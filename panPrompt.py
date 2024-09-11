@@ -271,14 +271,14 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
                     accuracy = correct / batch_labels.numel()
 
                     current_accuracy_list.append(accuracy)
-                    print("accuracy: {}".format(round(accuracy, 4)))
+                    #print("accuracy: {}".format(round(accuracy, 4)))
                     #print("loss: {}".format(loss.item()))
-                    print("preds:")
-                    print(preds.tolist())
-                    print("labels:")
-                    print(batch_labels.tolist())
-                    print("matches:")
-                    print((preds == batch_labels).type(torch.uint8).tolist())
+                    # print("preds:")
+                    # print(preds.tolist())
+                    # print("labels:")
+                    # print(batch_labels.tolist())
+                    # print("matches:")
+                    # print((preds == batch_labels).type(torch.uint8).tolist())
 
                     current_sequence.append(preds)
             
