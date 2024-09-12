@@ -152,6 +152,7 @@ def parse_args():
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
     parser.add_argument("--reuse_tokenizer", default=False, action="store_true", help="Reuse existing tokenizer if present.")
     parser.add_argument("--gradient_checkpointing", default=False, action="store_true", help="Use gradient checkpointing during training. Improves memory efficiency at cost to runtime.")
+    parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
     
     args = parser.parse_args()
 
@@ -303,7 +304,7 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart, rank, map_locati
         logging.error(error_msg)
         return 0, False
 
-def train_model(train_loader, model, optimizer, criterion, device, vocab_size, train_dataset_size, epoch):
+def train_model(train_loader, model, optimizer, criterion, device, vocab_size, encoder_only, epoch):
     """
     Train the transformer model on the training dataset.
 
@@ -324,11 +325,16 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, t
     model.train()  # Set the model to training mode
     total_train_loss = 0
     for i, (decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask) in enumerate(train_loader):  # Added enumeration for clarity
-        decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
         
         optimizer.zero_grad()  # Clear gradients before calculating them
-        #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
-        outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits  # Generate predictions
+        if encoder_only:
+            encoder_input, encoder_attention_mask, global_attention_mask = encoder_input.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
+            
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+        else:
+            decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
+            
+            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
 
         # Free GPU memory
         del encoder_input
@@ -358,7 +364,7 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, t
     #avg_train_loss = total_train_loss / train_dataset_size
     return total_train_loss
 
-def validate_model(val_loader, model, criterion, device, vocab_size, dataset_size, epoch=None):
+def validate_model(val_loader, model, criterion, device, vocab_size, encoder_only, epoch=None):
     """
     Validate the transformer model on the validation dataset.
 
@@ -384,10 +390,14 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
     labels_all = []
     with torch.no_grad():
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in val_loader:  # Correctly unpack the tuples returned by the DataLoader
-            decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
-
-            #outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
-            outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask).logits
+            if encoder_only:
+                encoder_input, encoder_attention_mask, global_attention_mask = encoder_input.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
+                
+                outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
+            else:
+                decoder_input, encoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
+                
+                outputs = model(input_ids=encoder_input, attention_mask=encoder_attention_mask, decoder_input_ids=decoder_input, decoder_attention_mask=decoder_attention_mask, global_attention_mask=global_attention_mask).logits  # Generate predictions
 
             # Free GPU memory
             del encoder_input
@@ -415,12 +425,12 @@ def validate_model(val_loader, model, criterion, device, vocab_size, dataset_siz
             accuracy = correct / labels.numel()
             total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
 
-            print("loss:")
-            print(loss.item())
-            print("preds:")
-            print(preds.tolist())
-            print("labels:")
-            print(labels.tolist())
+            # print("loss:")
+            # print(loss.item())
+            # print("preds:")
+            # print(preds.tolist())
+            # print("labels:")
+            # print(labels.tolist())
 
             #print("preds masked:")
             #print(preds.tolist())
@@ -692,7 +702,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     for epoch in range(start_epoch, epochs):
         # Training model loop
         train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
-        total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, train_dataset_size, epoch)
+        total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, args.encoder_only, epoch)
 
         total_train_loss_tensor = torch.tensor(total_train_loss).to(rank)
 
@@ -710,7 +720,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
 
         # Validate model loop
         val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
-        total_val_loss, total_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, val_dataset_size, epoch)
+        total_val_loss, total_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
         
         total_val_loss_tensor = torch.tensor(total_val_loss).to(rank)
         total_accuracy_tensor = torch.tensor(total_accuracy).to(rank)
@@ -778,7 +788,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
         test_loader = tqdm(test_loader, desc="Testing", unit="batch")
         # Test Model Loop
-        total_test_loss, total_test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, test_dataset_size)
+        total_test_loss, total_test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, args.encoder_only)
         
         total_test_loss_tensor = torch.tensor(total_test_loss).to(rank)
         total_accuracy_tensor = torch.tensor(total_test_accuracy).to(rank)
