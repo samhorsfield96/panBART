@@ -45,6 +45,7 @@ def parse_args():
     parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
     parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
+    parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
 
     args = parser.parse_args()
 
@@ -205,7 +206,7 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
     #model.config.use_cache = True
     return model
 
-def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_size, temperature, prop_masked, num_seq, max_seq_length, DDP_active):
+def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only):
     model.eval()
 
     predictions = []
@@ -221,7 +222,27 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
                 for i in range(0, total_len, max_seq_length):
                     # print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
 
-                    batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                    if encoder_only:
+                        batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                        
+                        outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                    
+                        # Free GPU memory
+                        del batch_encoder_input
+                        del batch_encoder_attention_mask
+                        del batch_global_attention_mask
+
+                    else:
+                        batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                        
+                        outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                        
+                        # Free GPU memory
+                        del batch_encoder_input
+                        del batch_encoder_attention_mask
+                        del batch_decoder_input
+                        del batch_decoder_attention_mask
+                        del batch_global_attention_mask
 
                     # generated iteratively (very slow)
                     # if generate == True:
@@ -236,15 +257,6 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
                     #         preds.append(next_token_id)
                     #     print(preds)
                     #     preds = torch.tensor([preds]).to(device)
-
-                    outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
-
-                    # Free GPU memory
-                    del encoder_input
-                    del encoder_attention_mask
-                    del decoder_input
-                    del decoder_attention_mask
-                    del global_attention_mask
 
                     #torch.cuda.empty_cache()
 
@@ -285,7 +297,7 @@ def predict_next_tokens_BART(model, tokenizer, prompt, loader, device, batch_siz
                 # concatenate predictions and get average accuracy
                 current_accuracy = sum(current_accuracy_list) / len(current_accuracy_list)
                 #print("accuracy: {}".format(round(current_accuracy, 4)))
-                accuracy_list.append(current_accuracy)
+                accuracy_list.append(round(current_accuracy, 4))
                 current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
                 sequence = torch.cat(current_sequence, dim=1).tolist()[0]
                 #print(sequence)
@@ -309,7 +321,7 @@ def split_prompts(prompts, world_size):
     chunk_size = len(prompts) // world_size
     return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, return_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list):
     if DDP_active:
         setup(rank, world_size)
         #prompt_list = prompt_list[rank]
@@ -326,7 +338,6 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
-    dataset_size = len(loader.dataset)
     
     model = LEDForConditionalGeneration(BARTlongformer_config)
     device = rank
@@ -348,7 +359,8 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     master_process = rank == 0
     #for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
 
-    predicted_text = predict_next_tokens_BART(model, tokenizer, prompt_list[0], loader, device, args.batch_size, args.temperature, args.prop_masked, args.num_seq, args.max_seq_length, DDP_active)
+    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only)
+    
     return_list.extend(predicted_text)
 
         
@@ -419,12 +431,12 @@ def main():
         with Manager() as manager:
             mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, return_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list)
     
     with open(args.outfile, "w") as f:
         for index, (acc, seq) in enumerate(return_list):
