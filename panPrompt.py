@@ -7,58 +7,173 @@ import numpy as np
 import argparse
 from tqdm import tqdm
 import re
+from tokenizers import Tokenizer
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+from multiprocessing import Manager
+import torch.multiprocessing as mp
+from panGPT import setup, cleanup, load_dataset
+import random
+from panGPT import mask_integers
+from torch.utils.data import DataLoader, DistributedSampler
 
 logging.set_verbosity_error()
 
-def pad_blocks(input_list, block_size, pad_token="<pad>"):
-    # Initialize the result list
-    result = []
-    attention_mask = []
+def parse_args():
+    """
+    Parse command-line arguments.
 
-    # Iterate over the list in steps of block_size
-    for i in range(0, len(input_list), block_size):
-        # Get the current block
-        block = input_list[i:i + block_size]
-        attention_block = [1] * len(block)
-        
-        # Check if the block needs padding
-        if len(block) < block_size:
-            # Pad the block to the required block size
-            attention_block += [0] * (block_size - len(block))
-            block += [pad_token] * (block_size - len(block))            
-        
-        # Add the block to the result
-        result.append(block)
-        attention_mask.append(attention_block)
-    
-    return result, attention_mask
+    This function parses the command-line arguments provided by the user and returns
+    a Namespace object containing the parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Token prediction with a Transformer or Reformer model.")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
+    parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
+    parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
+    parser.add_argument("--temperature", type=float, default=None, help="Temperature for prediction. if unset, will take most likely value.")
+    parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
+    parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
+    parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
+    parser.add_argument("--max_seq_length", type=int, default=16384, help="Maximum sequence length.")
+    parser.add_argument("--model_dropout_rate", type=float, default=0.2, help="Dropout rate for the model")
+    parser.add_argument("--batch_size", type=int, default=16, help="Maximum batch size for simulation. Default = 16")
+    parser.add_argument("--device", type=str, default=None, help="Device to run the model on (e.g., 'cpu' or 'cuda').")
+    parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
+    parser.add_argument("--prop_masked", type=float, default=0.15, help="Proportion of prompt to be masked. Default = 0.15")
+    parser.add_argument("--max_input_len", type=int, default=None, help="Maximum length of input sequence. No limit if not set.")
+    parser.add_argument("--min_input_len", type=int, default=None, help="Minimum length of input sequence. No limit if not set.")
+    parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
+    parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
+    parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
+    parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
+    parser.add_argument("--generate", default=False, action="store_true", help="Generate iteratively instead of as a block.")
 
-# returns list first entry is encoded, second is attention mask
-def tokenize_prompt(prompt, max_seq_length, tokenizer):
-    mask_token = tokenizer.mask_token_id
+    args = parser.parse_args()
 
-    encoded = tokenizer.encode(prompt)
+    # Ensure max_seq_length is greater than or equal to attention_window
+    args.max_seq_length = max(args.max_seq_length, args.attention_window)
+    # Round down max_seq_length to the nearest multiple of attention_window
+    args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
 
-    # merge consecutive masks into single mask token
-    encoder_input = ' '.join([str(i) for i in encoded])
-    #print('encoder_input pre merging')
-    #print(encoder_input)
-    pattern = f'({mask_token} )+'
-    encoder_input = re.sub(pattern, str(mask_token) + ' ', encoder_input)
-    pattern = f'( {mask_token})+'
-    encoder_input = re.sub(pattern, ' ' + str(mask_token), encoder_input)
+    return args
 
-    encoder_input = [int(i) for i in encoder_input.split()]
+def pad_input(input, max_length, pad_token_id, labels=False):
 
-    #print('encoder_input post merging')
-    #print(encoder_input)
+    len_masked = len(input)
+    # only pad if necessary
+    if len_masked >= max_length:
+        pass
+    else:
+        if labels == False:
+            input.extend([pad_token_id] * (max_length - len_masked))
+        else:
+            input.extend([-100] * (max_length - len_masked))
 
-    encoder_input, attention_mask = pad_blocks(encoder_input, max_seq_length, pad_token=tokenizer.pad_token_id)
+    return input
 
-    #print('encoder_input post padding')
-    #print(encoder_input)
+class GenomeDataset(torch.utils.data.Dataset):
+    """
+    Dataset class for genomic data.
 
-    return encoder_input, attention_mask
+    This class represents a dataset of genomic sequences for training, validation, or testing.
+
+    Args:
+    - texts (list): List of genomic sequences.
+    - tokenizer (Tokenizer): Tokenizer for encoding genomic sequences.
+    - max_length (int): Maximum length of the input sequence.
+
+    Methods:
+    - __len__(): Get the length of the dataset.
+    - __getitem__(idx): Get an item from the dataset by index.
+    """
+
+    def __init__(self, texts, tokenizer, max_length, prop_masked):
+        self.tokenizer = tokenizer
+        self.texts = texts
+        self.max_length = max_length
+        self.prop_masked = prop_masked
+        self.mask_token = self.tokenizer.encode("<mask>").ids[0]
+        self.pad_token = self.tokenizer.encode("<pad>").ids[0]
+        self.bos_token = self.tokenizer.encode("<s>").ids[0]
+        self.eos_token = self.tokenizer.encode("</s>").ids[0]
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+
+        input = self.tokenizer.encode(text).ids
+
+        # generate decoder and labels input, wrapping decoder input to right
+        labels = input[1:]
+
+        # mask original text
+        text = self.tokenizer.decode(labels, skip_special_tokens=False)
+        text_masked = mask_integers(text, self.prop_masked)
+
+        encoder_input = self.tokenizer.encode(text_masked).ids
+        decoder_input = input[:-1]
+
+        len_decoder = len(decoder_input)
+        decoder_input = pad_input(decoder_input, self.max_length, self.pad_token)
+
+        decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
+        decoder_attention_mask[len_decoder:] = 0
+
+        labels = pad_input(labels, self.max_length, self.pad_token, labels=True)
+
+        # merge consecutive masks into single mask token
+        encoder_input = ' '.join([str(i) for i in encoder_input])
+        #print('encoder_input pre merging')
+        #print(encoder_input)
+        pattern = f'({self.mask_token} )+'
+        encoder_input = re.sub(pattern, str(self.mask_token) + ' ', encoder_input)
+        pattern = f'( {self.mask_token})+'
+        encoder_input = re.sub(pattern, ' ' + str(self.mask_token), encoder_input)
+        #print('encoder_input post merging')
+        #print(encoder_input)
+        encoder_input = [int(i) for i in encoder_input.split()]
+
+        len_masked = len(encoder_input)
+        encoder_input = pad_input(encoder_input, self.max_length, self.pad_token)
+
+        #print('encoder_input post padding')
+        #print(encoder_input)
+
+        # do not attend to mask tokens
+        #print(int(self.mask_token))
+        #mask_idx = np.flatnonzero(np.array(encoder_input) == int(self.mask_token))
+
+        encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
+        encoder_attention_mask[len_masked:] = 0
+        #encoder_attention_mask[mask_idx] = 0
+
+        # attend to all contig breaks
+        global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
+        break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
+        global_attention_mask[break_idx] = 1
+
+        # print("labels")
+        # print(len(labels))
+        # print(labels)
+        # print("decoder_input")
+        # print(len(decoder_input))
+        # print(decoder_input)
+        # print("decoder_attention_mask")
+        # print(len(decoder_attention_mask.tolist()))
+        # print(decoder_attention_mask.tolist())
+        # print("encoder_input")
+        # print(len(encoder_input))
+        # print(encoder_input)
+        # print("encoder_attention_mask")
+        # print(len(encoder_attention_mask.tolist()))
+        # print(encoder_attention_mask.tolist())
+        # print("global_attention_mask")
+        # print(len(global_attention_mask.tolist()))
+        # print(global_attention_mask.tolist())
+
+        return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
 
 def print_banner():
     banner = '''
@@ -72,16 +187,8 @@ def print_banner():
     '''
     print(banner)
 
-def load_model(model_path, embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window):
-    # Infer the vocab size from the model checkpoint
-    checkpoint = torch.load(model_path, map_location=device)
-    #vocab_size = checkpoint['model_state_dict']['embed.weight'].size(0)
+def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window, model_dropout_rate):
 
-    # if model_type == 'transformer':
-    #     model = SimpleTransformerModel(vocab_size, embed_dim, num_heads, num_layers, max_seq_length)
-    # elif model_type == 'reformer':
-    #     model = SimpleReformerModel(vocab_size, embed_dim, reformer_depth, reformer_buckets, reformer_hashes)
-    # elif model_type == "BARTlongformer":
     BARTlongformer_config = LEDConfig(
         vocab_size=vocab_size,
         d_model=embed_dim,
@@ -93,81 +200,157 @@ def load_model(model_path, embed_dim, num_heads, num_layers, max_seq_length, dev
         encoder_ffn_dim=4 * embed_dim,
         max_encoder_position_embeddings=max_seq_length,
         max_decoder_position_embeddings=max_seq_length,
+        dropout=model_dropout_rate,
         attention_window = attention_window
-    )
+        )
     model = LEDForConditionalGeneration(BARTlongformer_config)
-    #else:
-        #raise ValueError(f"Unknown model type: {model_type}")
-
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.to(device)
+    model.config.use_cache = True
     return model
 
-
-def load_tokenizer(tokenizer_path):
-    #return Tokenizer.from_file(tokenizer_path)
-    return LEDTokenizer.from_pretrained(tokenizer_path, add_prefix_space=True)
-
-def mask_integers(string, prop_masked):   
-    # Identify the indices of the integers in the list
-    integer_indices = np.array(string.split())
-    
-    # Determine how many integers to mask
-    num_to_mask = int(len(integer_indices) * prop_masked)
-    
-    # Randomly select indices to mask
-    if num_to_mask > 0:
-        indices_to_mask = np.random.choice(range(len(integer_indices)), size=num_to_mask, replace=False)
-    else:
-        indices_to_mask = np.empty(shape=[0, 0])
-    
-    # Replace selected indices with "[MASK]"
-    integer_indices[indices_to_mask] = "<mask>"
-
-    # Reconstruct the string
-    masked_string = ' '.join(integer_indices.tolist())
-    
-    return masked_string
-
-def predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device, batch_size, temperature):
+def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only, generate, DDP_active):
     model.eval()
 
-    output = ""
-    num_batches = len(input_ids) // batch_size + (1 if len(input_ids) % batch_size != 0 else 0)
+    predictions = []
+    accuracy_list = []
+    with torch.no_grad():
+        # repeat for number of sequences required. Means each sequences is masked in different ways
+        for _ in range(num_seq):
+            for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
+    
+                total_len = encoder_input.size(1)
+                current_sequence = []
+                current_accuracy_list = []
+                for i in range(0, total_len, max_seq_length):
+                    # print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
 
-    for batch_index in range(num_batches):
-        start_index = batch_index * batch_size
-        end_index = min(start_index + batch_size, len(input_ids))
+                    if not generate:
+                        if encoder_only:
+                            batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                            
+                            outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                        
+                            # Free GPU memory
+                            del batch_encoder_input
+                            del batch_encoder_attention_mask
+                            del batch_global_attention_mask
 
-        # Stack input_ids and attention_mask for the current batch
-        batch_input_ids = torch.cat(input_ids[start_index:end_index], dim=0).to(device)
-        batch_attention_mask = torch.cat(attention_mask[start_index:end_index], dim=0).to(device)
+                        else:
+                            batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                            
+                            outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                            
+                            # Free GPU memory
+                            del batch_encoder_input
+                            del batch_encoder_attention_mask
+                            del batch_decoder_input
+                            del batch_decoder_attention_mask
+                            del batch_global_attention_mask
 
-        # Ensure all tokens attend globally just to the first token if first batch
-        global_attention_mask = torch.zeros(batch_input_ids.shape, dtype=torch.long, device=batch_input_ids.device)
-        if batch_index == 0:
-            global_attention_mask[0, 0] = 1
-        
-        #print(batch_attention_mask)
-        #print(batch_input_ids)
+                        if temperature != None:
+                            # generate predictions with Temperature
+                            scaled_logits = outputs / temperature
+                            probabilities = F.softmax(scaled_logits, dim=2)
+                            preds = torch.multinomial(probabilities.view(-1, probabilities.size(-1)), 1)
+                            # Reshape the sampled token IDs to match the batch size and sequence length
+                            preds = preds.view(outputs.size(0), outputs.size(1))
+                        else:
+                        # take highest value
+                            preds = outputs.argmax(dim=-1)  # Get predicted classes
+                        
+                        batch_labels = labels[:, i:i + max_seq_length].to(device)
 
-        # Generate summaries for the current batch
-        summary_ids = model.generate(
-            batch_input_ids,
-            global_attention_mask=global_attention_mask,
-            attention_mask=batch_attention_mask,
-            # is max length here correct?
-            max_length=batch_input_ids.shape[1],
-            temperature=temperature,
-            do_sample=True
-        )
+                        # ignore padding positions
+                        mask = batch_labels != -100
+                        preds = preds[mask]
+                        batch_labels = batch_labels[mask]
 
-        # Decode the generated summaries
-        for summary in summary_ids:
-            decoded = tokenizer.decode(summary.tolist(), skip_special_tokens=True)
-            output += decoded
+                        # calculate accuracy, ignore
+                        correct = (preds == batch_labels).sum().item()
+                        accuracy = correct / batch_labels.numel()
 
-    return output
+                        #print("matches:")
+                        #print((preds == batch_labels).type(torch.uint8).tolist())
+
+                    else:
+                        #generated iteratively (very slow)
+                        batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask, batch_decoder_input = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device), decoder_input[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                        if DDP_active:
+                            preds = model.module.generate(
+                                batch_encoder_input,
+                                global_attention_mask=batch_global_attention_mask,
+                                attention_mask=batch_encoder_attention_mask,
+                                # is max length here correct?
+                                max_length=batch_encoder_input.shape[1],
+                                temperature=temperature,
+                                num_return_sequences=1,   # Number of sequences to return
+                                do_sample=True,
+                                decoder_start_token_id=batch_decoder_input[:, 0]
+                            )
+                        else:
+                            preds = model.generate(
+                                batch_encoder_input,
+                                global_attention_mask=batch_global_attention_mask,
+                                attention_mask=batch_encoder_attention_mask,
+                                # is max length here correct?
+                                max_length=batch_encoder_input.shape[1],
+                                temperature=temperature,
+                                num_return_sequences=1,   # Number of sequences to return
+                                do_sample=True,
+                                decoder_start_token_id=batch_decoder_input[:, 0]
+                            )
+
+                        batch_labels = labels[:, i:i + max_seq_length].to(device)
+
+                        # ignore padding positions
+                        mask = batch_labels[:, :-1] != -100
+                        preds = preds[:, 1:][mask]
+                        batch_labels = batch_labels[:, :-1][mask]
+
+                        # calculate accuracy, ignore
+                        correct = (preds == batch_labels).sum().item()
+                        accuracy = correct / batch_labels.numel()
+
+                        #print("matches:")
+                        #print((preds == batch_labels).type(torch.uint8).tolist())
+
+                        # preds = batch_decoder_input[:, 0].tolist()
+                        # for j in tqdm(range(batch_encoder_input.shape[1]), desc="Token number", total=batch_encoder_input.shape[1]):
+                        #     tokens = torch.tensor([preds]).to(device)
+                        #     outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=tokens, global_attention_mask=batch_global_attention_mask).logits
+                        #     scaled_logits = outputs[0, j, :] / temperature
+                        #     probabilities = F.softmax(scaled_logits, dim=-1)
+                        #     next_token_id = torch.multinomial(probabilities, 1).item()
+                        #     #print(next_token_id)
+                        #     preds.append(next_token_id)
+                        # #print(preds)
+                        # preds = torch.tensor([preds[1:]]).to(device)
+
+                    #torch.cuda.empty_cache()
+
+                    current_accuracy_list.append(accuracy)
+                    #print("accuracy: {}".format(round(accuracy, 4)))
+                    #print("loss: {}".format(loss.item()))
+                    #print("preds:")
+                    #print(preds.tolist())
+                    #print("labels:")
+                    #print(batch_labels.tolist())
+
+                    current_sequence.append(preds)
+            
+                # concatenate predictions and get average accuracy
+                current_accuracy = sum(current_accuracy_list) / len(current_accuracy_list)
+                #print("accuracy: {}".format(round(current_accuracy, 4)))
+                accuracy_list.append(round(current_accuracy, 4))
+                current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
+                sequence = torch.cat(current_sequence, dim=1).tolist()[0]
+                #print(sequence)
+                predictions.append(sequence)
+
+    predictions = [tokenizer.decode(seq, skip_special_tokens=True) for seq in predictions]
+    
+    return_list = [(acc, seq) for acc, seq in zip(accuracy_list, predictions)]
+
+    return return_list
 
 def read_prompt_file(file_path):
     prompt_list = []
@@ -176,64 +359,133 @@ def read_prompt_file(file_path):
             prompt_list.append(line.strip())
     return prompt_list
 
+def split_prompts(prompts, world_size):
+    # Split prompts into approximately equal chunks for each GPU
+    chunk_size = len(prompts) // world_size
+    return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
+
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list):
+    if DDP_active:
+        setup(rank, world_size)
+        #prompt_list = prompt_list[rank]
+        sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
+        num_workers = 0
+        pin_memory = False
+        shuffle = False
+    else:
+        sampler = None
+        pin_memory = True
+        shuffle = False
+        num_workers=1
+    
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked)
+    dataset.attention_window = args.attention_window
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
+    
+    model = LEDForConditionalGeneration(BARTlongformer_config)
+    device = rank
+    model = model.to(device)
+    if DDP_active:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+
+    map_location = None
+    if DDP_active:
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        dist.barrier()
+    
+    if map_location != None:
+        checkpoint = torch.load(model_path, map_location=map_location)
+    else:
+        checkpoint = torch.load(model_path)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    master_process = rank == 0
+
+    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only, args.generate, DDP_active)
+    
+    return_list.extend(predicted_text)
+
+        
 def main():
     print_banner()
-    parser = argparse.ArgumentParser(description="Token prediction with a Transformer or Reformer model.")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
-    parser.add_argument("--model_type", type=str, required=True, choices=['transformer', 'reformer', 'BARTlongformer'], help="Type of model (transformer or reformer).")
-    parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
-    parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
-    parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for prediction.")
-    parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
-    parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
-    parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
-    parser.add_argument("--max_seq_length", type=int, default=16384, help="Maximum sequence length.")
-    parser.add_argument("--batch_size", type=int, default=16, help="Maximum batch size for simulation. Default = 16")
-    parser.add_argument("--device", type=str, default='cpu', help="Device to run the model on (e.g., 'cpu' or 'cuda').")
-    parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
-    parser.add_argument("--prop_masked", type=float, default=0.3, help="Proportion of prompt to be masked. Default = 0.3")
-    parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
-    parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
-    args = parser.parse_args()
+    args = parse_args()
+
+    tokenizer = Tokenizer.from_file(args.tokenizer_path)
+    vocab_size = tokenizer.get_vocab_size()
 
     args.max_seq_length = max(args.max_seq_length, args.attention_window)
     # Round down max_seq_length to the nearest multiple of attention_window
     args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
+    device = args.device
 
-    device = torch.device(args.device)
+    DDP_active = args.DDP
 
-    prop_masked = args.prop_masked
-    num_seq = args.num_seq
+    BARTlongformer_config = LEDConfig(
+        vocab_size=vocab_size,
+        d_model=args.embed_dim,
+        encoder_layers=args.num_layers,
+        decoder_layers=args.num_layers,
+        encoder_attention_heads=args.num_heads,
+        decoder_attention_heads=args.num_heads,
+        decoder_ffn_dim=4 * args.embed_dim,
+        encoder_ffn_dim=4 * args.embed_dim,
+        max_encoder_position_embeddings=args.max_seq_length,
+        max_decoder_position_embeddings=args.max_seq_length,
+        dropout=args.model_dropout_rate,
+        attention_window = args.attention_window
+        )
+    
+    world_size = torch.cuda.device_count()
+    if DDP_active:
+        if world_size > 0:
+            # Use DDP but just one GPU
+            if device != None:
+                device = torch.device("cuda:{}".format(device))
+                world_size = 1
+            else:
+                device = torch.device("cuda") # Run on a GPU if one is available
+            print("{} GPU(s) available, using cuda".format(world_size))
+        else:
+            print("GPU not available, using cpu.")
+            device = torch.device("cpu")
+    else:
+        if world_size > 0 and device != "cpu":
+            device = torch.device("cuda:{}".format(device))
+        else:
+            device = torch.device("cpu")
 
-    tokenizer = load_tokenizer(args.tokenizer_path)
-    vocab_size = tokenizer.vocab_size
+    prompt_list = load_dataset(args.prompt_file)
 
-    model = load_model(args.model_path, args.embed_dim, args.num_heads, args.num_layers,
-                        args.max_seq_length, device, vocab_size, args.attention_window)
-    #if args.model_type == 'transformer':
-    #    model.pos_encoding.pe = model.pos_encoding.pe[:args.max_len, :].to(device)  # Adjust the positional encoding based on max_len and device
+    # remove sequences that are too long or short
+    if args.max_input_len != None:
+        # len_list = [len(genome.split()) for genome in prompt_list]
+        # print(len_list)
+        prompt_list = [genome for genome in prompt_list if len(genome.split()) <= args.max_input_len]
 
-    prompt_list = read_prompt_file(args.prompt_file)
-    #if args.model_type == "BARTlongformer":
-        
+    if args.min_input_len != None:
+        # len_list = [len(genome.split()) for genome in prompt_list]
+        # print(len_list)
+        prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
+
+    return_list = []
+    if DDP_active:
+        prompt_list = split_prompts(prompt_list, world_size)
+        with Manager() as manager:
+            mp_list = manager.list()
+            mp.spawn(query_model,
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list),
+                    nprocs=world_size,
+                    join=True)
+            return_list = list(mp_list)
+    else:
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list)
+    
     with open(args.outfile, "w") as f:
-        for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list)):
-            if prop_masked > 0:
-                prompt = mask_integers(prompt, prop_masked)
+        for index, (acc, seq) in enumerate(return_list):
+            f.write(">" + str(index) + " accuracy: " + str(acc) + "\n" + str(seq) + "\n")
 
-            tokens, attention_mask = tokenize_prompt(prompt, args.max_seq_length, tokenizer)
-
-            #tokens = tokenizer.encode(prompt)
-            #print(tokens)
-            input_ids = [torch.tensor([input]) for input in tokens]
-            attention_mask = [torch.tensor([input], dtype=torch.long) for input in attention_mask]
-            
-            #print(prompt)
-            for _ in range(num_seq):
-                predicted_text = predict_next_tokens_BART(model, tokenizer, input_ids, attention_mask, device, args.batch_size, args.temperature)
-
-                f.write(predicted_text + "\n")
-
+    if DDP_active:
+        cleanup()
 
 if __name__ == "__main__":
     main()
