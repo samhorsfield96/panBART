@@ -45,7 +45,8 @@ def parse_args():
     parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
     parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
-    parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
+    parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
+    parser.add_argument("--generate", default=False, action="store_true", help="Generate iteratively instead of as a block.")
 
     args = parser.parse_args()
 
@@ -203,10 +204,10 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
         attention_window = attention_window
         )
     model = LEDForConditionalGeneration(BARTlongformer_config)
-    #model.config.use_cache = True
+    model.config.use_cache = True
     return model
 
-def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only):
+def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only, generate, DDP_active):
     model.eval()
 
     predictions = []
@@ -222,75 +223,117 @@ def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_
                 for i in range(0, total_len, max_seq_length):
                     # print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
 
-                    if encoder_only:
-                        batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                    if not generate:
+                        if encoder_only:
+                            batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                            
+                            outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
                         
-                        outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
-                    
-                        # Free GPU memory
-                        del batch_encoder_input
-                        del batch_encoder_attention_mask
-                        del batch_global_attention_mask
+                            # Free GPU memory
+                            del batch_encoder_input
+                            del batch_encoder_attention_mask
+                            del batch_global_attention_mask
+
+                        else:
+                            batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                            
+                            outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                            
+                            # Free GPU memory
+                            del batch_encoder_input
+                            del batch_encoder_attention_mask
+                            del batch_decoder_input
+                            del batch_decoder_attention_mask
+                            del batch_global_attention_mask
+
+                        if temperature != None:
+                            # generate predictions with Temperature
+                            scaled_logits = outputs / temperature
+                            probabilities = F.softmax(scaled_logits, dim=2)
+                            preds = torch.multinomial(probabilities.view(-1, probabilities.size(-1)), 1)
+                            # Reshape the sampled token IDs to match the batch size and sequence length
+                            preds = preds.view(outputs.size(0), outputs.size(1))
+                        else:
+                        # take highest value
+                            preds = outputs.argmax(dim=-1)  # Get predicted classes
+                        
+                        batch_labels = labels[:, i:i + max_seq_length].to(device)
+
+                        # ignore padding positions
+                        mask = batch_labels != -100
+                        preds = preds[mask]
+                        batch_labels = batch_labels[mask]
+
+                        # calculate accuracy, ignore
+                        correct = (preds == batch_labels).sum().item()
+                        accuracy = correct / batch_labels.numel()
+
+                        #print("matches:")
+                        #print((preds == batch_labels).type(torch.uint8).tolist())
 
                     else:
-                        batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
-                        
-                        outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
-                        
-                        # Free GPU memory
-                        del batch_encoder_input
-                        del batch_encoder_attention_mask
-                        del batch_decoder_input
-                        del batch_decoder_attention_mask
-                        del batch_global_attention_mask
+                        #generated iteratively (very slow)
+                        batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask, batch_decoder_input = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device), decoder_input[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
+                        if DDP_active:
+                            preds = model.module.generate(
+                                batch_encoder_input,
+                                global_attention_mask=batch_global_attention_mask,
+                                attention_mask=batch_encoder_attention_mask,
+                                # is max length here correct?
+                                max_length=batch_encoder_input.shape[1],
+                                temperature=temperature,
+                                num_return_sequences=1,   # Number of sequences to return
+                                do_sample=True,
+                                decoder_start_token_id=batch_decoder_input[:, 0]
+                            )
+                        else:
+                            preds = model.generate(
+                                batch_encoder_input,
+                                global_attention_mask=batch_global_attention_mask,
+                                attention_mask=batch_encoder_attention_mask,
+                                # is max length here correct?
+                                max_length=batch_encoder_input.shape[1],
+                                temperature=temperature,
+                                num_return_sequences=1,   # Number of sequences to return
+                                do_sample=True,
+                                decoder_start_token_id=batch_decoder_input[:, 0]
+                            )
 
-                    # generated iteratively (very slow)
-                    # if generate == True:
-                    #     preds = batch_decoder_input[:, 0].tolist()
-                    #     for j in range(batch_encoder_input.shape[1]):
-                    #         tokens = torch.tensor([preds]).to(device)
-                    #         outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=tokens, global_attention_mask=batch_global_attention_mask).logits
-                    #         scaled_logits = outputs[0, j, :] / temperature
-                    #         probabilities = F.softmax(scaled_logits, dim=-1)
-                    #         next_token_id = torch.multinomial(probabilities, 1).item()
-                    #         #print(next_token_id)
-                    #         preds.append(next_token_id)
-                    #     print(preds)
-                    #     preds = torch.tensor([preds]).to(device)
+                        batch_labels = labels[:, i:i + max_seq_length].to(device)
+
+                        # ignore padding positions
+                        mask = batch_labels[:, :-1] != -100
+                        preds = preds[:, 1:][mask]
+                        batch_labels = batch_labels[:, :-1][mask]
+
+                        # calculate accuracy, ignore
+                        correct = (preds == batch_labels).sum().item()
+                        accuracy = correct / batch_labels.numel()
+
+                        #print("matches:")
+                        #print((preds == batch_labels).type(torch.uint8).tolist())
+
+                        # preds = batch_decoder_input[:, 0].tolist()
+                        # for j in tqdm(range(batch_encoder_input.shape[1]), desc="Token number", total=batch_encoder_input.shape[1]):
+                        #     tokens = torch.tensor([preds]).to(device)
+                        #     outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=tokens, global_attention_mask=batch_global_attention_mask).logits
+                        #     scaled_logits = outputs[0, j, :] / temperature
+                        #     probabilities = F.softmax(scaled_logits, dim=-1)
+                        #     next_token_id = torch.multinomial(probabilities, 1).item()
+                        #     #print(next_token_id)
+                        #     preds.append(next_token_id)
+                        # #print(preds)
+                        # preds = torch.tensor([preds[1:]]).to(device)
 
                     #torch.cuda.empty_cache()
-
-                    batch_labels = labels[:, i:i + max_seq_length].to(device)
-
-                    if temperature != None:
-                        # generate predictions with Temperature
-                        scaled_logits = outputs / temperature
-                        probabilities = F.softmax(scaled_logits, dim=2)
-                        preds = torch.multinomial(probabilities.view(-1, probabilities.size(-1)), 1)
-                        # Reshape the sampled token IDs to match the batch size and sequence length
-                        preds = preds.view(outputs.size(0), outputs.size(1))
-                    else:
-                    # take highest value
-                        preds = outputs.argmax(dim=-1)  # Get predicted classes
-
-                    # ignore padding positions
-                    mask = batch_labels != -100
-                    preds = preds[mask]
-                    batch_labels = batch_labels[mask]
-
-                    # calculate accuracy
-                    correct = (preds == batch_labels).sum().item()
-                    accuracy = correct / batch_labels.numel()
 
                     current_accuracy_list.append(accuracy)
                     #print("accuracy: {}".format(round(accuracy, 4)))
                     #print("loss: {}".format(loss.item()))
-                    # print("preds:")
-                    # print(preds.tolist())
-                    # print("labels:")
-                    # print(batch_labels.tolist())
-                    # print("matches:")
-                    # print((preds == batch_labels).type(torch.uint8).tolist())
+                    #print("preds:")
+                    #print(preds.tolist())
+                    #print("labels:")
+                    #print(batch_labels.tolist())
 
                     current_sequence.append(preds)
             
@@ -357,9 +400,8 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     model.load_state_dict(checkpoint["model_state_dict"])
 
     master_process = rank == 0
-    #for prompt in tqdm(prompt_list, desc="Prompt number", total=len(prompt_list), disable=not master_process and DDP_active):
 
-    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only)
+    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only, args.generate, DDP_active)
     
     return_list.extend(predicted_text)
 
