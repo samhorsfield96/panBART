@@ -12,7 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from multiprocessing import Manager
 import torch.multiprocessing as mp
-from panGPT import setup, cleanup, load_dataset
+from panGPT import setup, cleanup
 import random
 from panGPT import mask_integers
 from torch.utils.data import DataLoader, DistributedSampler
@@ -56,6 +56,30 @@ def parse_args():
     args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
 
     return args
+
+def load_dataset(input_file):
+    """
+    Load the dataset from the input file.
+
+    Args:
+    - input_file (str): Path to the input file containing the dataset.
+
+    Returns:
+    - list: List of strings, each representing a genome sequence.
+
+    This function reads the contents of the input file, which contains genome sequences,
+    and returns a list of genome sequences.
+    """
+    try:
+        with open(input_file, "r") as file:
+            genomes = ["_ " + genome.strip() + " _" for genome in file.readlines()]
+        return genomes
+    except FileNotFoundError:
+        print(f"Error: The input file '{input_file}' was not found.")
+        exit(1)
+    except Exception as e:
+        print(f"An error occurred while reading the file: {e}")
+        exit(1)
 
 def pad_input(input, max_length, pad_token_id, labels=False):
 
@@ -107,6 +131,7 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         # generate decoder and labels input, wrapping decoder input to right
         labels = input[1:]
+        #print(labels)
 
         # mask original text
         text = self.tokenizer.decode(labels, skip_special_tokens=False)
