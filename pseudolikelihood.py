@@ -121,7 +121,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
 
                     # iterate over whole sequence for masking
                     for j in range(len(batch_encoder_input[0])):
-                        masked_encoder_input = batch_decoder_input.clone()
+                        masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
                         
@@ -142,7 +142,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     
                     # iterate over whole sequence for masking
                     for j in tqdm(range(len(batch_encoder_input[0]))):
-                        masked_encoder_input = batch_decoder_input.clone()
+                        masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
 
