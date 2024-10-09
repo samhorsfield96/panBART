@@ -43,6 +43,7 @@ def parse_args():
     parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
+    parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
 
     args = parser.parse_args()
 
@@ -266,6 +267,13 @@ def main():
             device = torch.device("cpu")
 
     prompt_list = load_dataset(args.prompt_file)
+
+    # randomise
+    if args.randomise:
+        prompt_list = [genome.split() for genome in prompt_list]
+        for genome in prompt_list:
+            random.shuffle(genome)
+        prompt_list = [" ".join(genome) for genome in prompt_list]
 
     # remove sequences that are too long or short
     if args.max_input_len != None:
