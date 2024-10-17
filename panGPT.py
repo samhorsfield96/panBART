@@ -153,6 +153,8 @@ def parse_args():
     parser.add_argument("--reuse_tokenizer", default=False, action="store_true", help="Reuse existing tokenizer if present.")
     parser.add_argument("--gradient_checkpointing", default=False, action="store_true", help="Use gradient checkpointing during training. Improves memory efficiency at cost to runtime.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
+    parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
+
     
     args = parser.parse_args()
 
@@ -965,6 +967,13 @@ def main():
         train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
         val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
 
+    # print test genomes to file
+    if len(test_genomes) > 0 and args.save_test_data:
+        file_base, _ = os.path.splitext(model_save_path)
+        save_path = file_base + "_test_genomes.txt"
+        with open(save_path, "w") as o:
+            for entry in test_genomes:
+                o.write(entry + "\n")
 
     print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
     if DDP_active:
