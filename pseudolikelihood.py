@@ -16,6 +16,7 @@ from panGPT import setup, cleanup
 import random
 from torch.utils.data import DataLoader, DistributedSampler
 from panPrompt import GenomeDataset, load_dataset
+from collections import defaultdict
 
 logging.set_verbosity_error()
 
@@ -40,10 +41,11 @@ def parse_args():
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--max_input_len", type=int, default=None, help="Maximum length of input sequence. No limit if not set.")
     parser.add_argument("--min_input_len", type=int, default=None, help="Minimum length of input sequence. No limit if not set.")
-    parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
+    parser.add_argument("--outpref", type=str, default="simulated_genomes", help="Output prefix for simulated genomes. Default = 'simulated_genomes'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
     parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
+    parser.add_argument("--per-gene", default=False, action="store_true", help="Calculate per-gene pseudolikelihoods")
 
     args = parser.parse_args()
 
@@ -97,16 +99,20 @@ def get_pseudolikelihood(outputs, i, batch_encoder_input):
     token_prob = torch.softmax(logits, dim=-1)[original_token_id].item()
 
     # Add the log probability to the total log-pseudo-likelihood
-    log_pseudo_likelihood = torch.log(torch.tensor(token_prob))
+    log_pseudo_likelihood = torch.log(torch.tensor(token_prob)).to("cpu")
+    
+    # move elements to cpu
+    original_token_id = original_token_id.to("cpu").item()
+    
+    return log_pseudo_likelihood, original_token_id
 
-    return log_pseudo_likelihood
-
-def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only):
+def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, per_gene):
     model.eval()
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
 
     log_pseudo_likelihood_list = []
+    gene_dict = defaultdict(list)
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
@@ -131,9 +137,14 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     
                         outputs = model(input_ids=masked_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
 
-                        log_pseudo_likelihood += get_pseudolikelihood(outputs, i, batch_encoder_input)
+                        log_pseudo_likelihood_gene, original_token_id = get_pseudolikelihood(outputs, j, batch_encoder_input)
+                        log_pseudo_likelihood += log_pseudo_likelihood_gene
+
+                        if per_gene:
+                            gene_dict[original_token_id].append(log_pseudo_likelihood_gene.item())
 
                     # Free GPU memory
+                    del batch_encoder_input
                     del masked_encoder_input
                     del batch_encoder_attention_mask
                     del batch_global_attention_mask
@@ -151,9 +162,14 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     
                         outputs = model(input_ids=masked_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
 
-                        log_pseudo_likelihood += get_pseudolikelihood(outputs, i, batch_encoder_input)
+                        log_pseudo_likelihood_gene, original_token_id = get_pseudolikelihood(outputs, j, batch_encoder_input)
+                        log_pseudo_likelihood += log_pseudo_likelihood_gene
+
+                        if per_gene:
+                            gene_dict[original_token_id].append(log_pseudo_likelihood_gene.item())
 
                     # Free GPU memory
+                    del masked_encoder_input
                     del batch_encoder_input
                     del batch_encoder_attention_mask
                     del batch_decoder_input
@@ -163,7 +179,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
             #print(log_pseudo_likelihood.item())
             log_pseudo_likelihood_list.append(log_pseudo_likelihood.item())
 
-    return log_pseudo_likelihood_list
+    return log_pseudo_likelihood_list, gene_dict
 
 def read_prompt_file(file_path):
     prompt_list = []
@@ -177,7 +193,7 @@ def split_prompts(prompts, world_size):
     chunk_size = len(prompts) // world_size
     return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list, gene_list):
     if DDP_active:
         setup(rank, world_size)
         #prompt_list = prompt_list[rank]
@@ -214,9 +230,10 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    log_pseudolikelihood_list = calculate_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only)
+    log_pseudolikelihood_list, gene_dict = calculate_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.per_gene)
     
     return_list.extend(log_pseudolikelihood_list)
+    gene_list.append(gene_dict)
 
         
 def main():
@@ -287,19 +304,43 @@ def main():
         prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
 
     return_list = []
+    gene_list = None
+    if args.per_gene:
+        gene_list = []
     if DDP_active:
         prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp_list = manager.list()
+            gene_mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list, gene_mp_list),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
+            if args.per_gene:
+                gene_list = list(gene_mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list, gene_list)
     
-    with open(args.outfile, "w") as f:
+    # unpack gene_list
+    if args.per_gene:
+        gene_dict = {}
+        for entry in gene_list:
+            for key, value in entry.items():
+                decoded_key = tokenizer.decode([key], skip_special_tokens=False)
+                if decoded_key in gene_dict:
+                    gene_dict[decoded_key].extend(value)
+                else:
+                    gene_dict[decoded_key] = value.copy()
+        
+        # decode and write output
+        with open(args.outpref + "_per_gene.txt", "w") as f:
+            f.write("Gene_ID\tlog_pseudolikelihood\n")
+            for key, value_list in gene_dict.items():
+                for value in value_list:
+                    f.write("{}\t{}\n".format(key, value)) 
+
+    with open(args.outpref + "_pseudolikelihood.txt", "w") as f:
         f.write("Index\tlog_pseudolikelihood\n")
         for index, likelihood in enumerate(return_list):
             f.write(str(index) + "\t" + str(likelihood) + "\n")
