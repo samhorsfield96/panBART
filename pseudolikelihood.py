@@ -99,7 +99,7 @@ def get_pseudolikelihood(outputs, i, batch_encoder_input):
     token_prob = torch.softmax(logits, dim=-1)[original_token_id].item()
 
     # Add the log probability to the total log-pseudo-likelihood
-    log_pseudo_likelihood = torch.log(torch.tensor(token_prob)).to("cpu")
+    log_pseudo_likelihood = torch.log(torch.tensor(token_prob)).to("cpu").item()
     
     # move elements to cpu
     original_token_id = original_token_id.to("cpu").item()
@@ -141,7 +141,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                         log_pseudo_likelihood += log_pseudo_likelihood_gene
 
                         if per_gene:
-                            gene_dict[original_token_id].append(log_pseudo_likelihood_gene.item())
+                            gene_dict[original_token_id].append(log_pseudo_likelihood_gene)
 
                     # Free GPU memory
                     del batch_encoder_input
@@ -166,7 +166,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                         log_pseudo_likelihood += log_pseudo_likelihood_gene
 
                         if per_gene:
-                            gene_dict[original_token_id].append(log_pseudo_likelihood_gene.item())
+                            gene_dict[original_token_id].append(log_pseudo_likelihood_gene)
 
                     # Free GPU memory
                     del masked_encoder_input
@@ -176,8 +176,8 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     del batch_decoder_attention_mask
                     del batch_global_attention_mask
 
-            #print(log_pseudo_likelihood.item())
-            log_pseudo_likelihood_list.append(log_pseudo_likelihood.item())
+            #print(log_pseudo_likelihood)
+            log_pseudo_likelihood_list.append(log_pseudo_likelihood)
 
     return log_pseudo_likelihood_list, gene_dict
 
