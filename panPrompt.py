@@ -205,8 +205,8 @@ def print_banner():
     **************************************************
     *                                                *
     *        Transformer Model Token Prediction      *
-    *        panPrompt v0.01                         *
-    *        author: James McInerney                 *
+    *        panPrompt v0.1.0                        *
+    *        author: Samuel Horsfield                *
     *                                                *
     **************************************************
     '''

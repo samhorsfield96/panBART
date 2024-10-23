@@ -27,9 +27,9 @@ import random
 import re
 
 # Global variables
-PROGRAM_NAME = "panGPT"
-VERSION = "0.10a"
-AUTHOR = "James McInerney"
+PROGRAM_NAME = "panBART"
+VERSION = "0.1.0"
+AUTHOR = "Samuel Horsfield"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -651,6 +651,10 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         model.config.use_cache = False
     
     
+    # print model params
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(f"Total model parameters: {pytorch_total_params}")
+    
     device = rank
     model = model.to(device)
     logging.info(f"device = {device}")
@@ -698,7 +702,6 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             logging.info("Continuing training from the loaded checkpoint.")
         else:
             logging.info("Starting training from scratch.")
-    start_epoch = 0
 
     writer = SummaryWriter(log_dir=log_dir)
     for epoch in range(start_epoch, epochs):
