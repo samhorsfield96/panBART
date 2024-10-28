@@ -308,7 +308,7 @@ def main():
     if args.per_gene:
         gene_list = []
     if DDP_active:
-        prompt_list = split_prompts(prompt_list, world_size)
+        #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp_list = manager.list()
             gene_mp_list = manager.list()
