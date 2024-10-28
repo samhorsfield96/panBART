@@ -494,7 +494,7 @@ def main():
 
     return_list = []
     if DDP_active:
-        prompt_list = split_prompts(prompt_list, world_size)
+        #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp_list = manager.list()
             mp.spawn(query_model,
