@@ -18,8 +18,47 @@ from torch.utils.data import DataLoader, DistributedSampler
 from panPrompt import GenomeDataset, load_dataset
 from functools import partial
 import shap
+import scipy as sp
+from panPrompt import pad_input, mask_integers
 
 logging.set_verbosity_error()
+
+def tokenise_input(text, tokenizer, max_length, pad_token, mask_token):
+    input = tokenizer.encode(text).ids
+
+    # mask original text
+    text = tokenizer.decode(input[1:], skip_special_tokens=False)
+    text_masked = mask_integers(text, 0)
+
+    encoder_input = tokenizer.encode(text_masked).ids
+    decoder_input = input[:-1]
+
+    len_decoder = len(decoder_input)
+    decoder_input = pad_input(decoder_input, max_length, pad_token)
+
+    decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
+    decoder_attention_mask[len_decoder:] = 0
+
+    # merge consecutive masks into single mask token
+    encoder_input = ' '.join([str(i) for i in encoder_input])
+    pattern = f'({mask_token} )+'
+    encoder_input = re.sub(pattern, str(mask_token) + ' ', encoder_input)
+    pattern = f'( {mask_token})+'
+    encoder_input = re.sub(pattern, ' ' + str(mask_token), encoder_input)
+    encoder_input = [int(i) for i in encoder_input.split()]
+
+    len_masked = len(encoder_input)
+    encoder_input = pad_input(encoder_input, max_length, pad_token)
+
+    encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
+    encoder_attention_mask[len_masked:] = 0
+
+    # attend to all contig breaks
+    global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
+    break_idx = np.flatnonzero(np.array(encoder_input) == int(tokenizer.encode("_").ids[0]))
+    global_attention_mask[break_idx] = 1
+
+    return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
 
 def parse_args():
     """
@@ -91,88 +130,86 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
     model.config.use_cache = True
     return model
 
-def get_pseudolikelihood(outputs, i, batch_encoder_input):
 
-    logits = outputs[0, i]
-
-    # Get the probability of the original token
-    original_token_id = batch_encoder_input[0, i]
-    token_prob = torch.softmax(logits, dim=-1)[original_token_id].item()
-
-    # Add the log probability to the total log-pseudo-likelihood
-    log_pseudo_likelihood = torch.log(torch.tensor(token_prob)).to("cpu").item()
-    
-    # move elements to cpu
-    original_token_id = original_token_id.to("cpu").item()
-    
-    return log_pseudo_likelihood, original_token_id
-
-def model_predict(inputs, model, target_token_encoded, device, max_seq_length):
+# this defines an explicit python function that takes a list of strings and outputs scores for each class
+def f(x, model, device, tokenizer, max_length, pad_token, mask_token, encoder_only=False):
+    outputs = []
     model.eval()
-    # unpack inputs
-    encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = inputs
-    batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
-
-    # Forward pass through the model
-    outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits
-    
-    # get position for target token, only works for first in sequence at the moment
-    positions = torch.nonzero(batch_encoder_input == target_token_encoded, as_tuple=False).squeeze().tolist()
-
-    # Extract logits for the specific token position
-    return outputs[:, positions[0], :].detach().numpy()
-
-def model_predict_encoder_only(inputs, model, target_token_encoded, device, max_seq_length):
-    model.eval()
-    
-    # unpack inputs
-    encoder_input, encoder_attention_mask, global_attention_mask = inputs
-    batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
-    
-    # Forward pass through the model
-    outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits
-    
-    # get position for target token, only works for first in sequence at the moment
-    positions = torch.nonzero(batch_encoder_input == target_token_encoded, as_tuple=False).squeeze().tolist()
-
-    # Extract logits for the specific token position
-    return outputs[:, positions[0], :].detach().numpy()
-
-def calculate_SHAP(model, tokenizer, loader, device, max_seq_length, encoder_only, target_token):
-    target_token_encoded = tokenizer.encode(target_token).ids[0]
-
-    num_sequences = len(loader.dataset)
-
-    # sample background sequences from loader
-    input_list = []
-    for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:
-        # check if token in sequence, otherwise don't add
-        positions = torch.nonzero(encoder_input == target_token_encoded, as_tuple=False).squeeze().tolist()
-        if len(positions) == 0:
-            continue
-
+    for _x in x:
+        encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_length, pad_token, mask_token)
         if encoder_only:
-            input_list.append((encoder_input, encoder_attention_mask, global_attention_mask))
+            batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+            output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask)[0].detach().cpu().numpy()
         else:
-            input_list.append((encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask))
+            batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+            output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask)[0].detach().cpu().numpy()
+    
+    outputs = np.array(outputs)
+    scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
+    val = sp.special.logit(scores)
+    return val
 
-    shap_values_list = []
-    with torch.no_grad():
-        if encoder_only:
-            model_predict_function = partial(model_predict_encoder_only, model=model, target_token_encoded=target_token_encoded, device=device, max_seq_length=max_seq_length)
-        else:
-            model_predict_function = partial(model_predict, model=model, target_token_encoded=target_token_encoded, device=device, max_seq_length=max_seq_length)
+# def model_predict(input_list, model, target_token_encoded, device, max_seq_length):
+#     model.eval()
+#     outputs = []
+#     # unpack inputs
+#     for inputs in input_list:
+
+#         encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = inputs
+#         batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+
+#         # Forward pass through the model
+#         output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
         
-        explainer = shap.DeepExplainer(model_predict_function, input_list)
+#         # get position for target token, only works for first in sequence at the moment
+#         positions = torch.nonzero(batch_encoder_input == target_token_encoded, as_tuple=False).squeeze().tolist()
 
-        # Compute SHAP values for the input text
-        for input in input_list:
-            shap_values = explainer.shap_values(input[0])
-            print(shap_values)
-            shap_values_list.append(shap_values)
+#         outputs.append(output[positions[0]])
 
-        # Visualize SHAP values
-        #shap.summary_plot(shap_values, inputs["input_ids"], feature_names=tokenizer.convert_ids_to_tokens(inputs["input_ids"][0].tolist()))
+#     outputs = np.array(outputs)
+#     scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
+#     val = sp.special.logit(scores)
+#     return val
+
+# def model_predict_encoder_only(input_list, model, target_token_encoded, device, max_seq_length):
+#     model.eval()
+    
+#     outputs = []
+#     # unpack inputs
+#     for inputs in input_list:
+#         encoder_input, encoder_attention_mask, global_attention_mask = inputs
+#         batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+        
+#         # Forward pass through the model
+#         output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
+        
+#         # get position for target token, only works for first in sequence at the moment
+#         positions = torch.nonzero(batch_encoder_input == target_token_encoded, as_tuple=False).squeeze().tolist()
+
+#         outputs.append(output[positions[0]])
+
+#     outputs = np.array(outputs)
+#     scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
+#     val = sp.special.logit(scores)
+#     return val
+
+def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token):
+    # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/language_modelling/Language%20Modeling%20Explanation%20Demo.html
+    mask_token = tokenizer.encode("<mask>").ids[0]
+    pad_token = tokenizer.encode("<pad>").ids[0]
+
+    labels = sorted(model.config.label2id, key=model.config.label2id.get)
+
+    wrapped_model = shap.models.TopKLM(model, tokenizer, k=100)
+    masker = shap.maskers.Text(tokenizer, mask_token=target_token, collapse_mask_token=True)
+
+    # create partial function
+    f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_length=max_length, pad_token=pad_token, mask_token=mask_token, encoder_only=encoder_only)
+
+    explainer = shap.Explainer(f_partial, masker, output_names=labels)
+
+    shap_values = explainer(prompt_list)
+    print(shap_values)
 
     return shap_values_list
 
@@ -196,11 +233,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         pin_memory = True
         shuffle = False
         num_workers=1
-    
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0)
-    dataset.attention_window = args.attention_window
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
-    
+        
     model = LEDForConditionalGeneration(BARTlongformer_config)
     device = rank
     model = model.to(device)
@@ -220,7 +253,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    shap_values_list = calculate_SHAP(model, tokenizer, loader, device, args.max_seq_length, encoder_only, target_token)
+    shap_values_list = calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token)
     
     return_list.extend(shap_values_list)
 
