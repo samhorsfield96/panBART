@@ -19,11 +19,25 @@ from panPrompt import GenomeDataset, load_dataset
 from functools import partial
 import shap
 import scipy as sp
-from panPrompt import pad_input, mask_integers
+from panPrompt import mask_integers
 
 logging.set_verbosity_error()
 
-def tokenise_input(text, tokenizer, max_length, pad_token, mask_token):
+def pad_input(input, max_seq_length, pad_token_id, labels=False):
+
+    len_masked = len(input)
+    # only pad if necessary
+    if len_masked >= max_seq_length:
+        pass
+    else:
+        if labels == False:
+            input.extend([pad_token_id] * (max_seq_length - len_masked))
+        else:
+            input.extend([-100] * (max_seq_length - len_masked))
+
+    return input
+
+def tokenise_input(text, tokenizer, max_seq_length, pad_token, mask_token):
     input = tokenizer.encode(text).ids
 
     # mask original text
@@ -34,7 +48,7 @@ def tokenise_input(text, tokenizer, max_length, pad_token, mask_token):
     decoder_input = input[:-1]
 
     len_decoder = len(decoder_input)
-    decoder_input = pad_input(decoder_input, max_length, pad_token)
+    decoder_input = pad_input(decoder_input, max_seq_length, pad_token)
 
     decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
     decoder_attention_mask[len_decoder:] = 0
@@ -48,7 +62,7 @@ def tokenise_input(text, tokenizer, max_length, pad_token, mask_token):
     encoder_input = [int(i) for i in encoder_input.split()]
 
     len_masked = len(encoder_input)
-    encoder_input = pad_input(encoder_input, max_length, pad_token)
+    encoder_input = pad_input(encoder_input, max_seq_length, pad_token)
 
     encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
     encoder_attention_mask[len_masked:] = 0
@@ -58,7 +72,7 @@ def tokenise_input(text, tokenizer, max_length, pad_token, mask_token):
     break_idx = np.flatnonzero(np.array(encoder_input) == int(tokenizer.encode("_").ids[0]))
     global_attention_mask[break_idx] = 1
 
-    return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
+    return torch.tensor(decoder_input, dtype=torch.long).unsqueeze(0), torch.tensor(encoder_input, dtype=torch.long).unsqueeze(0), decoder_attention_mask.unsqueeze(0), encoder_attention_mask.unsqueeze(0), global_attention_mask.unsqueeze(0)
 
 def parse_args():
     """
@@ -96,20 +110,6 @@ def parse_args():
 
     return args
 
-def pad_input(input, max_length, pad_token_id, labels=False):
-
-    len_masked = len(input)
-    # only pad if necessary
-    if len_masked >= max_length:
-        pass
-    else:
-        if labels == False:
-            input.extend([pad_token_id] * (max_length - len_masked))
-        else:
-            input.extend([-100] * (max_length - len_masked))
-
-    return input
-
 def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window, model_dropout_rate):
 
     BARTlongformer_config = LEDConfig(
@@ -132,11 +132,11 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
 
 
 # this defines an explicit python function that takes a list of strings and outputs scores for each class
-def f(x, model, device, tokenizer, max_length, pad_token, mask_token, encoder_only=False):
+def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, encoder_only=False):
     outputs = []
     model.eval()
     for _x in x:
-        encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_length, pad_token, mask_token)
+        encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
         if encoder_only:
             batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask)[0].detach().cpu().numpy()
@@ -149,6 +149,26 @@ def f(x, model, device, tokenizer, max_length, pad_token, mask_token, encoder_on
     val = sp.special.logit(scores)
     return val
 
+#may need to change this to use the correct tokenizer
+def custom_tokenizer(s, return_offsets_mapping=True):
+    """Custom tokenizers conform to a subset of the transformers API."""
+    pos = 0
+    offset_ranges = []
+    input_ids = []
+    for m in re.finditer(r"\W", s):
+        start, end = m.span(0)
+        offset_ranges.append((pos, start))
+        input_ids.append(s[pos:start])
+        pos = end
+    if pos != len(s):
+        offset_ranges.append((pos, len(s)))
+        input_ids.append(s[pos:])
+    out = {}
+    out["input_ids"] = input_ids
+    if return_offsets_mapping:
+        out["offset_mapping"] = offset_ranges
+    return out
+
 # def model_predict(input_list, model, target_token_encoded, device, max_seq_length):
 #     model.eval()
 #     outputs = []
@@ -156,7 +176,7 @@ def f(x, model, device, tokenizer, max_length, pad_token, mask_token, encoder_on
 #     for inputs in input_list:
 
 #         encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = inputs
-#         batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+#         batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, :, 0:max_seq_length].to(device), encoder_input[:, :, 0:max_seq_length].to(device), decoder_attention_mask[:, :, 0:max_seq_length].to(device), encoder_attention_mask[:, :, 0:max_seq_length].to(device), global_attention_mask[:, :, 0:max_seq_length].to(device)
 
 #         # Forward pass through the model
 #         output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
@@ -178,7 +198,7 @@ def f(x, model, device, tokenizer, max_length, pad_token, mask_token, encoder_on
 #     # unpack inputs
 #     for inputs in input_list:
 #         encoder_input, encoder_attention_mask, global_attention_mask = inputs
-#         batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+#         batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, :, 0:max_seq_length].to(device), encoder_attention_mask[:, :, 0:max_seq_length].to(device), global_attention_mask[:, :, 0:max_seq_length].to(device)
         
 #         # Forward pass through the model
 #         output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
@@ -194,18 +214,16 @@ def f(x, model, device, tokenizer, max_length, pad_token, mask_token, encoder_on
 #     return val
 
 def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token):
-    # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/language_modelling/Language%20Modeling%20Explanation%20Demo.html
+    # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
 
     labels = sorted(model.config.label2id, key=model.config.label2id.get)
 
-    wrapped_model = shap.models.TopKLM(model, tokenizer, k=100)
-    masker = shap.maskers.Text(tokenizer, mask_token=target_token, collapse_mask_token=True)
-
     # create partial function
-    f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_length=max_length, pad_token=pad_token, mask_token=mask_token, encoder_only=encoder_only)
+    f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, encoder_only=encoder_only)
 
+    masker = shap.maskers.Text(custom_tokenizer)
     explainer = shap.Explainer(f_partial, masker, output_names=labels)
 
     shap_values = explainer(prompt_list)
