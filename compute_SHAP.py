@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
-from transformers import LEDConfig, LEDForConditionalGeneration, logging, PreTrainedTokenizerFast
+from transformers import LEDConfig, LEDForConditionalGeneration, LEDTokenizer, logging
 import numpy as np
 import argparse
 from tqdm import tqdm
@@ -136,47 +136,41 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, encode
     outputs = []
     model.eval()
     for _x in x:
-        encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(" ".join(_x), tokenizer, max_seq_length, pad_token, mask_token)
+        print(_x)
+        encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
+        print(encoder_input)
         if encoder_only:
             batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
         else:
             batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
-
-        outputs.append(output[0])
-
-    outputs = np.array(outputs)
+    
+    outputs = np.array(output)
     print(outputs)
-    exp_outputs = np.exp(outputs)
-    exp_outputs_transpose = exp_outputs.T
-    sum_exp_outputs = exp_outputs.sum(-1)
-    print(sum_exp_outputs)
-
-    # Define batch size for column division to avoid massive memory usage
-    batch_size = 512  # Choose a reasonable batch size that fits in memory
-    num_columns = exp_outputs_transpose.shape[2]  # Number of columns
-
-    # Placeholder for output (to store the batched results)
-    scores = np.zeros_like(exp_outputs_transpose, dtype=np.float32)
-
-    # Iterate over columns in batches
-    for start_col in range(0, num_columns, batch_size):
-        end_col = min(start_col + batch_size, num_columns)  # Ensure we don’t exceed bounds
-        # Slice the batch of columns for both numerator and denominator
-        exp_outputs_batch = exp_outputs_transpose[:, :, start_col:end_col]
-        print(exp_outputs_batch)
-        sum_exp_batch = sum_exp_outputs[:, start_col:end_col]
-        print(sum_exp_batch)
-        
-        # Perform the division on the batch
-        temp_scores = exp_outputs_batch / sum_exp_batch
-        print(temp_scores)
-        scores[:, :, start_col:end_col] = temp_scores
-
-    print(scores)
-    val = sp.special.logit(scores.T)
+    scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
+    val = sp.special.logit(scores)
     return val
+
+#may need to change this to use the correct tokenizer
+def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
+    """Wraps a Tokenizers tokenizer to conform to SHAP's expectations."""
+    
+    # Tokenize using the Tokenizers package
+    encoding = tokenizer.encode(s)
+    
+    # Extract input_ids and offset mapping
+    input_ids = encoding.ids
+    if return_offsets_mapping:
+        offset_ranges = encoding.offsets
+    else:
+        offset_ranges = None
+    
+    # Format the output to match the transformers-like format
+    out = {"input_ids": input_ids}
+    if return_offsets_mapping:
+        out["offset_mapping"] = offset_ranges
+    return out
 
 def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token):
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
@@ -188,18 +182,15 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
     # create partial function
     f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, encoder_only=encoder_only)
-    
-    # create compatible tokenizer
-    fast_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
-    #tokenizer_partial = partial(tokenizer, tokenizer=tokenizer)
+    tokenizer_partial = partial(custom_tokenizer, tokenizer=tokenizer)
 
-    masker = shap.maskers.Text(tokenizer=fast_tokenizer, mask_token="<mask>")
+    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask>")
     explainer = shap.Explainer(f_partial, masker, output_names=labels)
 
-    #print(prompt_list)
-    for entry in prompt_list:
-        shap_values = explainer([entry])
-        print(shap_values)
+    
+    for element in prompt_list:
+        shap_values = explainer([element])
+    print(shap_values)
 
     return shap_values_list
 
@@ -251,7 +242,6 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 def main():
     args = parse_args()
 
-    print("Loading tokenizer...")
     tokenizer = Tokenizer.from_file(args.tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
 
@@ -317,7 +307,6 @@ def main():
         prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
 
     return_list = []
-    print("Running SHAPs workflow...")
     if DDP_active:
         #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
