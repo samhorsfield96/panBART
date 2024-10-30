@@ -145,10 +145,35 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, encode
         else:
             batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
-    
-    outputs = np.array(output)
-    print(outputs)
-    scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
+
+        outputs.append(output[0])
+
+    # save all scores in same output
+    outputs = output[0]
+
+    # Define batch size for columns
+    batch_size = 512
+    num_columns = outputs.shape[0]
+    print(num_columns)
+    print(outputs.shape)
+
+    # Placeholder for output
+    scores = np.zeros_like(outputs)
+
+    # Iterate over columns in batches
+    for start_col in range(0, num_columns, batch_size):
+        end_col = min(start_col + batch_size, num_columns)
+
+        score_exp = np.exp(outputs[:, start_col:end_col, :])
+        print(score_exp)
+        print(score_exp.sum(-1))
+        
+        # Perform the division
+        scores[:, start_col:end_col, :] = (score_exp.T / score_exp.sum(-1)).T
+        #scores[:, start_col:end_col, :] = score_exp.T / score_exp.sum(-1)
+
+
+    print(scores)
     val = sp.special.logit(scores)
     return val
 
