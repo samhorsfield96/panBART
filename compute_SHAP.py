@@ -132,50 +132,51 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
 
 
 # this defines an explicit python function that takes a list of strings and outputs scores for each class
-def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, encoder_only=False):
+def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, encoder_only=False):
     outputs = []
     model.eval()
     for _x in x:
-        print(_x)
+        #print(_x)
         encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
-        print(encoder_input)
+        #print(encoder_input)
+        #print(pos)
         if encoder_only:
             batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
         else:
             batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
-
-        outputs.append(output[0])
+        
+        #print(output)
+        outputs.append(output[0][pos])
 
     # save all scores in same output
-    outputs = output[0]
-
-    # Define batch size for columns
-    batch_size = 512
-    num_columns = outputs.shape[0]
-    print(num_columns)
-    print(outputs.shape)
-
-    # Placeholder for output
-    scores = np.zeros_like(outputs)
-
-    # Iterate over columns in batches
-    for start_col in range(0, num_columns, batch_size):
-        end_col = min(start_col + batch_size, num_columns)
-
-        score_exp = np.exp(outputs[:, start_col:end_col, :])
-        print(score_exp)
-        print(score_exp.sum(-1))
-        
-        # Perform the division
-        scores[:, start_col:end_col, :] = (score_exp.T / score_exp.sum(-1)).T
-        #scores[:, start_col:end_col, :] = score_exp.T / score_exp.sum(-1)
-
-
-    print(scores)
+    #outputs = output[0]
+    outputs = np.array(outputs)
+    scores = (np.exp(outputs).T / np.exp(outputs).sum(-1)).T
     val = sp.special.logit(scores)
+    #print(val)
     return val
+
+    # # Placeholder for output
+    # scores = np.zeros_like(outputs)
+
+    # # Iterate over columns in batches
+    # for start_col in range(0, num_columns, batch_size):
+    #     end_col = min(start_col + batch_size, num_columns)
+
+    #     score_exp = np.exp(outputs[:, start_col:end_col, :])
+    #     print(score_exp)
+    #     print(score_exp.sum(-1))
+        
+    #     # Perform the division
+    #     scores[:, start_col:end_col, :] = (score_exp.T / score_exp.sum(-1)).T
+    #     #scores[:, start_col:end_col, :] = score_exp.T / score_exp.sum(-1)
+
+
+    # print(scores)
+    # val = sp.special.logit(scores)
+    #return val
 
 #may need to change this to use the correct tokenizer
 def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
@@ -201,20 +202,39 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
+    target_token_encoded = tokenizer.encode(target_token).ids[0]
 
-    labels = sorted(model.config.label2id, key=model.config.label2id.get)
-    print(labels)
+    # Get the vocabulary dictionary: {token: token_id}
+    vocab_dict = tokenizer.get_vocab()
 
-    # create partial function
-    f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, encoder_only=encoder_only)
+    # Sort tokens by token ID to get them in the order they appear in the logits
+    sorted_vocab = sorted(vocab_dict.items(), key=lambda item: item[1])
+
+    # Extract the tokens in order of their IDs
+    labels = [token for token, _ in sorted_vocab]
+    #print(labels)
+
+    # create partial tokenizer
     tokenizer_partial = partial(custom_tokenizer, tokenizer=tokenizer)
-
     masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask>")
-    explainer = shap.Explainer(f_partial, masker, output_names=labels)
 
-    
     for element in prompt_list:
-        shap_values = explainer([element])
+        # only look if element is present
+        if target_token in element.split(" "):
+            # get positions of elements
+            positions = torch.nonzero(torch.tensor(tokenizer.encode(element).ids[1:]) == target_token_encoded, as_tuple=False).squeeze().tolist()
+            # ensure positions is a list even if single entry
+            positions = [positions] if not isinstance(positions, list) else positions
+
+            # increment through each position is found in
+            for pos in positions:
+                # create partial function
+                f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos, encoder_only=encoder_only)
+                
+                explainer = shap.Explainer(f_partial, masker, output_names=labels)
+
+                shap_values = explainer([element])
+        
     print(shap_values)
 
     return shap_values_list
