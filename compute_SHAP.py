@@ -136,7 +136,7 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, e
     outputs = []
     model.eval()
     for _x in x:
-        #print(_x)
+        print(_x)
         encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
         #print(encoder_input)
         #print(pos)
@@ -216,26 +216,34 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
     # create partial tokenizer
     tokenizer_partial = partial(custom_tokenizer, tokenizer=tokenizer)
-    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask>")
+    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask> ")
 
-    for element in prompt_list:
+    shap_values_list = []
+    for idx, element in enumerate(prompt_list):
+        split_element = element.split(" ")
         # only look if element is present
-        if target_token in element.split(" "):
+        if target_token in split_element:
             # get positions of elements
-            positions = torch.nonzero(torch.tensor(tokenizer.encode(element).ids[1:]) == target_token_encoded, as_tuple=False).squeeze().tolist()
-            # ensure positions is a list even if single entry
-            positions = [positions] if not isinstance(positions, list) else positions
+            positions = [index for index, value in enumerate(split_element) if value == target_token]
 
             # increment through each position is found in
             for pos in positions:
-                # create partial function
-                f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos, encoder_only=encoder_only)
+                # create partial function, need to add pos+1 as output is one token shuffled from input
+                f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos + 1, encoder_only=encoder_only)
                 
                 explainer = shap.Explainer(f_partial, masker, output_names=labels)
 
-                shap_values = explainer([element])
-        
-    print(shap_values)
+                # change indices to masks one at a time to ensure token doesn't imapct on itself
+                split_element[pos] = "<mask>"
+                new_element = " ".join(split_element)
+                print(new_element)
+
+                shap_values = explainer([new_element])
+
+                print(shap_values)
+
+                shap_values_list.append(((idx, pos), shap_values))
+                fail
 
     return shap_values_list
 
