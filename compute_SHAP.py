@@ -20,6 +20,7 @@ from functools import partial
 import shap
 import scipy as sp
 from panPrompt import mask_integers
+import pandas as pd
 
 logging.set_verbosity_error()
 
@@ -136,7 +137,6 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, e
     outputs = []
     model.eval()
     for _x in x:
-        print(_x)
         encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
         #print(encoder_input)
         #print(pos)
@@ -158,26 +158,6 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, e
     #print(val)
     return val
 
-    # # Placeholder for output
-    # scores = np.zeros_like(outputs)
-
-    # # Iterate over columns in batches
-    # for start_col in range(0, num_columns, batch_size):
-    #     end_col = min(start_col + batch_size, num_columns)
-
-    #     score_exp = np.exp(outputs[:, start_col:end_col, :])
-    #     print(score_exp)
-    #     print(score_exp.sum(-1))
-        
-    #     # Perform the division
-    #     scores[:, start_col:end_col, :] = (score_exp.T / score_exp.sum(-1)).T
-    #     #scores[:, start_col:end_col, :] = score_exp.T / score_exp.sum(-1)
-
-
-    # print(scores)
-    # val = sp.special.logit(scores)
-    #return val
-
 #may need to change this to use the correct tokenizer
 def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
     """Wraps a Tokenizers tokenizer to conform to SHAP's expectations."""
@@ -198,7 +178,7 @@ def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
         out["offset_mapping"] = offset_ranges
     return out
 
-def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token):
+def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref):
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
@@ -236,16 +216,30 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 # change indices to masks one at a time to ensure token doesn't imapct on itself
                 split_element[pos] = "<mask>"
                 new_element = " ".join(split_element)
-                print(new_element)
 
                 shap_values = explainer([new_element])
 
-                print(shap_values)
+                # shap_values has three class objects:
+                # .values: of shape (1, N_positions, N_token_ids)
+                # .base_values: of shape (1, N_token_ids)
+                # .data: list of all input data tokens
+                # to get the shap value for a given position X on the token of interest Y,
+                # need to get .base_values[Y] + .values[X, Y]
 
-                shap_values_list.append(((idx, pos), shap_values))
-                fail
+                #print(shap_values.values.shape)
+                #print(shap_values.base_values.shape)
 
-    return shap_values_list
+                #print(shap_values)
+
+                # generate output array
+                output_array = (shap_values.values + shap_values.base_values).squeeze(0).T
+                #print(output_array.shape)
+
+                df = pd.DataFrame(output_array, index=labels, columns=split_element)
+
+                # Display the DataFrame
+                df.to_csv(outpref + "_geneid_" + str(target_token) + "_fileidx_" + str(idx) + "_pos_" + str(pos) + ".csv", index=True)
+
 
 def read_prompt_file(file_path):
     prompt_list = []
@@ -287,9 +281,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    shap_values_list = calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token)
-    
-    return_list.extend(shap_values_list)
+    shap_values_list = calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, outpref)
 
         
 def main():
@@ -359,18 +351,16 @@ def main():
         # print(len_list)
         prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
 
-    return_list = []
     if DDP_active:
         #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
-            mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token, mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token, args.outpref),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token, return_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token, args.outpref)
     
 
     with open(args.outpref + "_shap_values.txt", "w") as f:
