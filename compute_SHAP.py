@@ -248,7 +248,7 @@ def read_prompt_file(file_path):
             prompt_list.append(line.strip())
     return prompt_list
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, target_token, return_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, target_token):
     if DDP_active:
         setup(rank, world_size)
         #prompt_list = prompt_list[rank]
@@ -281,7 +281,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    shap_values_list = calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, outpref)
+    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref)
 
         
 def main():
@@ -355,18 +355,12 @@ def main():
         #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token, args.outpref),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token),
                     nprocs=world_size,
                     join=True)
-            return_list = list(mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token, args.outpref)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token)
     
-
-    with open(args.outpref + "_shap_values.txt", "w") as f:
-        f.write("Index\tlog_pseudolikelihood\n")
-        for index, likelihood in enumerate(return_list):
-            f.write(str(index) + "\t" + str(likelihood) + "\n")
 
     if DDP_active:
         cleanup()
