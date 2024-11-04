@@ -55,6 +55,7 @@ def tokenise_input(text, tokenizer, max_seq_length, pad_token, mask_token):
     decoder_attention_mask[len_decoder:] = 0
 
     # merge consecutive masks into single mask token
+    # might be issue, might not need to block mask
     encoder_input = ' '.join([str(i) for i in encoder_input])
     pattern = f'({mask_token} )+'
     encoder_input = re.sub(pattern, str(mask_token) + ' ', encoder_input)
@@ -137,6 +138,7 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, e
     outputs = []
     model.eval()
     for _x in x:
+        #print(_x)
         encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
         #print(encoder_input)
         #print(pos)
@@ -176,6 +178,8 @@ def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
     out = {"input_ids": input_ids}
     if return_offsets_mapping:
         out["offset_mapping"] = offset_ranges
+    #print(s)
+    #print(out["offset_mapping"])
     return out
 
 def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref):
@@ -196,7 +200,8 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
     # create partial tokenizer
     tokenizer_partial = partial(custom_tokenizer, tokenizer=tokenizer)
-    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask> ")
+    # issue might be how masker is working, if it truncates sequences rather than just masking positions.
+    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask> ", collapse_mask_token=False)
 
     shap_values_list = []
     for idx, element in enumerate(prompt_list):
@@ -239,6 +244,7 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
                 # Display the DataFrame
                 df.to_csv(outpref + "_geneid_" + str(target_token) + "_fileidx_" + str(idx) + "_pos_" + str(pos) + ".csv", index=True)
+                fail
 
 
 def read_prompt_file(file_path):
