@@ -217,7 +217,7 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos + 1, encoder_only=encoder_only)
                 
                 # set max_evals to be same as permutations required for position to be masked and unmasked
-                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels)#, max_evals= 2 * min(len(split_element), max_seq_length) + 1)
+                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1)
 
                 # change indices to masks one at a time to ensure token doesn't imapct on itself
                 split_element[pos] = "<mask>"
