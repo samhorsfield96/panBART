@@ -244,8 +244,6 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
                 # Display the DataFrame
                 df.to_csv(outpref + "_geneid_" + str(target_token) + "_fileidx_" + str(idx) + "_pos_" + str(pos) + ".csv", index=True)
-                fail
-
 
 def read_prompt_file(file_path):
     prompt_list = []
