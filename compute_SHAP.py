@@ -101,7 +101,7 @@ def parse_args():
     parser.add_argument("--outpref", type=str, default="simulated_genomes", help="Output prefix for simulated genomes. Default = 'simulated_genomes'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
-    parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
+    parser.add_argument("--seed", default=42, type=int, help="Seed for randomisation")
 
     args = parser.parse_args()
 
@@ -182,7 +182,7 @@ def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
     #print(out["offset_mapping"])
     return out
 
-def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref):
+def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed):
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
@@ -217,7 +217,7 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos + 1, encoder_only=encoder_only)
                 
                 # set max_evals to be same as permutations required for position to be masked and unmasked
-                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1)
+                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1, seed=seed)
 
                 # change indices to masks one at a time to ensure token doesn't imapct on itself
                 split_element[pos] = "<mask>"
@@ -287,7 +287,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref)
+    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref, args.seed)
 
         
 def main():
