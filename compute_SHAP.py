@@ -216,7 +216,8 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 # create partial function, need to add pos+1 as output is one token shuffled from input
                 f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos + 1, encoder_only=encoder_only)
                 
-                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals=min(len(split_element), max_seq_length))
+                # set max_evals to be same as permutations required for position to be masked and unmasked
+                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels)#, max_evals= 2 * min(len(split_element), max_seq_length) + 1)
 
                 # change indices to masks one at a time to ensure token doesn't imapct on itself
                 split_element[pos] = "<mask>"
@@ -236,11 +237,12 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
                 #print(shap_values)
 
-                # generate output array
-                output_array = (shap_values.values + shap_values.base_values).squeeze(0).T
+                # generate output array, concatenate base values to each row
+                #output_array = (shap_values.values + shap_values.base_values).squeeze(0).T
                 #print(output_array.shape)
 
-                df = pd.DataFrame(output_array, index=labels, columns=split_element)
+                df = pd.DataFrame(shap_values.values.squeeze(0).T, index=labels, columns=split_element)
+                df["base_value"] = shap_values.base_values.squeeze(0).T
 
                 # Display the DataFrame
                 df.to_csv(outpref + "_geneid_" + str(target_token) + "_fileidx_" + str(idx) + "_pos_" + str(pos) + ".csv", index=True)
