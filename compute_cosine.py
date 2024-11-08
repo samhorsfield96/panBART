@@ -111,7 +111,18 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
 
-    # need to sum embeddings for each token as it appears in example sentences, then divide by number of times its seen. Then have average embedding per token, get cosine distance between them
+    # Get the vocabulary dictionary: {token: token_id}
+    vocab_dict = tokenizer.get_vocab()
+
+    # Sort tokens by token ID to get them in the order they appear in the logits
+    sorted_vocab = sorted(vocab_dict.items(), key=lambda item: item[1])
+
+    # Extract the tokens in order of their IDs
+    labels = [token for token, _ in sorted_vocab]
+
+    hidden_size = model.config.hidden_size
+    token_embeddings_sum = defaultdict(lambda: torch.zeros(hidden_size))
+    token_counts = defaultdict(int)
 
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
@@ -138,17 +149,13 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
                     
                     
                     outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask, output_hidden_states=True)  # Generate predictions
-
                     #decoder_hidden_states = outputs.decoder_hidden_states
-                    encoder_last_hidden_state = outputs.encoder_last_hidden_state
+                    encoder_last_hidden_state = outputs.encoder_last_hidden_state.detach().cpu().squeeze(0)
 
-                    token_embeddings = encoder_last_hidden_state.squeeze(0)
-                    normalized_embeddings = torch.nn.functional.normalize(token_embeddings, p=2, dim=1)
-                    print(normalized_embeddings)
-
-                    cosine_similarities = torch.mm(normalized_embeddings, normalized_embeddings.T)
-
-                    print(cosine_similarities)
+                    # Aggregate embeddings and update counts for each token
+                    for idx, token_id in enumerate(batch_encoder_input.squeeze(0)):
+                        token_embeddings_sum[token_id] += encoder_last_hidden_state[idx]
+                        token_counts[token_id] += 1
 
                     # Free GPU memory
                     del batch_encoder_input
@@ -157,7 +164,35 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
                     del batch_decoder_attention_mask
                     del batch_global_attention_mask
 
-                    fail
+    # calculate average embeddings
+    token_avg_embeddings = {}
+    for token_id, embedding_sum in token_embeddings_sum.items():
+        count = token_counts[token_id]
+        if count > 0:
+            token_avg_embeddings[token_id] = embedding_sum / count
+
+    # generate torch tensor of average embeddings
+    token_list = list(token_avg_embeddings.values())
+    tokens = list(token_avg_embeddings.keys())
+    token_embeddings = torch.stack(token_list)  # Shape: (num_tokens, hidden_size)
+    print("token_embeddings")
+    print(token_embeddings)
+
+    # Normalize the embeddings
+    normalized_embeddings = torch.nn.functional.normalize(token_embeddings, p=2, dim=1)
+    print("normalized_embeddings")
+    print(normalized_embeddings)
+
+    # Compute pairwise cosine similarities
+    cosine_similarities = cosine_similarity(normalized_embeddings.unsqueeze(0), normalized_embeddings.unsqueeze(1))
+    print("cosine_similarities")
+    print(cosine_similarities)
+
+    # Step 3: Construct the pairwise cosine similarity matrix
+    cosine_similarity_matrix = cosine_similarities.squeeze(0).cpu().numpy()
+
+    print("cosine_similarity_matrix")
+    print(cosine_similarity_matrix)
 
     return None
 
