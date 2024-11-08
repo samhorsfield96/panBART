@@ -127,7 +127,13 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
 
                     # iterate over whole sequence for masking
-                    for j in range(len(batch_encoder_input[0])):
+                    padding_positions = (batch_encoder_input == pad_token).nonzero(as_tuple=True)
+                    if padding_positions[0].numel() > 0:
+                        token_count = padding_positions[0][0].item()  # Position of the first padding token
+                    else:
+                        token_count = max_seq_length
+                        
+                    for j in tqdm(range(token_count)):
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
@@ -153,7 +159,13 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
                     
                     # iterate over whole sequence for masking
-                    for j in tqdm(range(len(batch_encoder_input[0]))):
+                    padding_positions = (batch_encoder_input == pad_token).nonzero(as_tuple=True)
+                    if padding_positions[0].numel() > 0:
+                        token_count = padding_positions[0][0].item()  # Position of the first padding token
+                    else:
+                        token_count = max_seq_length
+
+                    for j in tqdm(range(token_count))):
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
