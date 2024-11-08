@@ -181,7 +181,7 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
 
     # generate torch tensor of average embeddings
     token_list = list(token_avg_embeddings.values())
-    tokens = list(token_avg_embeddings.keys())
+    tokens = [tokenizer.decode([x]) for x in token_avg_embeddings.keys()]
     token_embeddings = torch.stack(token_list)  # Shape: (num_tokens, hidden_size)
     # print("token_embeddings")
     # print(token_embeddings)
