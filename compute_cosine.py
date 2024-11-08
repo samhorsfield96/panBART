@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from panPrompt import GenomeDataset, load_dataset
 from collections import defaultdict
 from torch.nn.functional import cosine_similarity
+import pandas as pd
 
 logging.set_verbosity_error()
 
@@ -106,7 +107,7 @@ def get_pseudolikelihood(outputs, i, batch_encoder_input):
     
     return log_pseudo_likelihood, original_token_id
 
-def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_only):
+def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_only, outpref):
     model.eval()
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
@@ -119,10 +120,13 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
 
     # Extract the tokens in order of their IDs
     labels = [token for token, _ in sorted_vocab]
+    #print(len(labels))
 
     hidden_size = model.config.hidden_size
     token_embeddings_sum = defaultdict(lambda: torch.zeros(hidden_size))
     token_counts = defaultdict(int)
+
+    #label_set = set()
 
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
@@ -154,8 +158,10 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
 
                     # Aggregate embeddings and update counts for each token
                     for idx, token_id in enumerate(batch_encoder_input.squeeze(0)):
-                        token_embeddings_sum[token_id] += encoder_last_hidden_state[idx]
-                        token_counts[token_id] += 1
+                        _token_id = token_id.item()
+                        token_embeddings_sum[_token_id] += encoder_last_hidden_state[idx]
+                        token_counts[_token_id] += 1
+                        #label_set.add(_token_id)
 
                     # Free GPU memory
                     del batch_encoder_input
@@ -164,6 +170,8 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
                     del batch_decoder_attention_mask
                     del batch_global_attention_mask
 
+    #print(len(label_set))
+    #print(label_set)
     # calculate average embeddings
     token_avg_embeddings = {}
     for token_id, embedding_sum in token_embeddings_sum.items():
@@ -175,26 +183,36 @@ def calculate_cosine(model, tokenizer, loader, device, max_seq_length, encoder_o
     token_list = list(token_avg_embeddings.values())
     tokens = list(token_avg_embeddings.keys())
     token_embeddings = torch.stack(token_list)  # Shape: (num_tokens, hidden_size)
-    print("token_embeddings")
-    print(token_embeddings)
+    # print("token_embeddings")
+    # print(token_embeddings)
+    # print(token_embeddings.shape)
 
     # Normalize the embeddings
     normalized_embeddings = torch.nn.functional.normalize(token_embeddings, p=2, dim=1)
-    print("normalized_embeddings")
-    print(normalized_embeddings)
+    # print("normalized_embeddings")
+    # print(normalized_embeddings)
+    # print(normalized_embeddings.shape)
+
 
     # Compute pairwise cosine similarities
-    cosine_similarities = cosine_similarity(normalized_embeddings.unsqueeze(0), normalized_embeddings.unsqueeze(1))
-    print("cosine_similarities")
-    print(cosine_similarities)
+    cosine_similarities = torch.mm(normalized_embeddings, normalized_embeddings.T)
+    # print("cosine_similarities")
+    # print(cosine_similarities)
+    # print(cosine_similarities.shape)
 
     # Step 3: Construct the pairwise cosine similarity matrix
+    cosine_similarities = torch.clamp(cosine_similarities, min=-1.0, max=1.0)
     cosine_similarity_matrix = cosine_similarities.squeeze(0).cpu().numpy()
 
-    print("cosine_similarity_matrix")
-    print(cosine_similarity_matrix)
+    # print("cosine_similarity_matrix")
+    # print(cosine_similarity_matrix)
+    # print(cosine_similarities.shape)
+    
+    df = pd.DataFrame(cosine_similarity_matrix, index=tokens, columns=tokens)
 
-    return None
+    # Display the DataFrame
+    df.to_csv(outpref + ".csv", index=True)
+
 
 def read_prompt_file(file_path):
     prompt_list = []
@@ -208,7 +226,7 @@ def split_prompts(prompts, world_size):
     chunk_size = len(prompts) // world_size
     return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only):
     if DDP_active:
         setup(rank, world_size)
         #prompt_list = prompt_list[rank]
@@ -245,9 +263,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    calculate_cosine(model, tokenizer, loader, device, args.max_seq_length, encoder_only)
-    
-    return_list.extend([])
+    calculate_cosine(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref)
 
         
 def main():
@@ -323,17 +339,12 @@ def main():
         with Manager() as manager:
             mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list)
-    
-    with open(args.outpref + "_cosine.txt", "w") as f:
-        f.write("Index\tlog_pseudolikelihood\n")
-        for index, likelihood in enumerate(return_list):
-            f.write(str(index) + "\t" + str(likelihood) + "\n")
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only)
 
     if DDP_active:
         cleanup()
