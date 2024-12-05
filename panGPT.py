@@ -225,11 +225,11 @@ def load_dataset(input_file):
         with open(input_file, "r") as file:
             genomes = [genome.strip() for genome in file.readlines()]
             # randomise conitg order
-            for index in range(len(genomes)):
-                split_genome = genomes[index].split(" _ ")
-                random.shuffle(split_genome)
-                genome = "_ " + " _ ".join(split_genome) + " _"
-                genomes[index] = genome
+            #for index in range(len(genomes)):
+            #    split_genome = genomes[index].split(" _ ")
+            #    random.shuffle(split_genome)
+            #    genome = "_ " + " _ ".join(split_genome) + " _"
+            #    genomes[index] = genome
         return genomes
     except FileNotFoundError:
         print(f"Error: The input file '{input_file}' was not found.")
@@ -491,7 +491,18 @@ class GenomeDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         text = self.texts[idx]
 
-        input = self.tokenizer.encode(text).ids
+        # randomise contig order and flip randomly
+        split_genome = text.split(" _ ")
+        flip_contigs = [random.random() < 0.5 for _ in range(len(split_genome))]
+
+        for index, contig in enumerate(split_genome):
+            if flip_contigs[index]:
+                split_genome[index] = " ".join([str(int(x) * -1) for x in contig.split()][::-1])
+
+        random.shuffle(split_genome)
+        genome = "_ " + " _ ".join(split_genome) + " _"
+
+        input = self.tokenizer.encode(genome).ids
 
         beginning = 0
 
@@ -706,7 +717,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     writer = SummaryWriter(log_dir=log_dir)
     for epoch in range(start_epoch, epochs):
         # Training model loop
-        train_loader.sampler.set_epoch(epoch)
+        #train_loader.sampler.set_epoch(epoch)
         train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
         total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, args.encoder_only, epoch)
 
@@ -725,7 +736,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             writer.add_scalar("Learning_rate/train", optimizer.param_groups[0]["lr"], epoch)
 
         # Validate model loop
-        val_loader.sampler.set_epoch(epoch)
+        #val_loader.sampler.set_epoch(epoch)
         val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
         total_val_loss, total_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
         
@@ -792,7 +803,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked)
         test_dataset.attention_window = attention_window
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=test_sampler)
-        test_loader.sampler.set_epoch(epoch)
+        #test_loader.sampler.set_epoch(epoch)
         test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
         test_loader = tqdm(test_loader, desc="Testing", unit="batch")
         # Test Model Loop
