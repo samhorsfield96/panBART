@@ -238,7 +238,7 @@ def load_dataset(input_file):
         print(f"An error occurred while reading the file: {e}")
         exit(1)
 
-def save_checkpoint(model, optimizer, epoch, loss, save_path):
+def save_checkpoint(model, optimizer, epoch, loss, lr_scheduler, save_path):
     """
     Save the model checkpoint to a file.
 
@@ -258,13 +258,14 @@ def save_checkpoint(model, optimizer, epoch, loss, save_path):
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "lr_scheduler" : lr_scheduler,
             "loss": loss,
         }
         torch.save(checkpoint, save_path)
     except IOError as e:
         print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, checkpoint_path, restart, rank, map_location=None):
+def load_checkpoint(model, optimizer, lr_scheduler, checkpoint_path, restart, rank, map_location=None):
     """
     Load a model checkpoint from a file.
 
@@ -295,6 +296,7 @@ def load_checkpoint(model, optimizer, checkpoint_path, restart, rank, map_locati
             checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        lr_scheduler = checkpoint["lr_scheduler"]
         start_epoch = checkpoint["epoch"] + 1
         print(f"Checkpoint loaded. Resuming training from epoch {start_epoch}")
         return start_epoch, True
@@ -492,13 +494,18 @@ class GenomeDataset(torch.utils.data.Dataset):
         text = self.texts[idx]
 
         # randomise contig order and flip randomly
-        split_genome = text.split(" _ ")
+        split_genome = text.split("_")
         flip_contigs = [random.random() < 0.5 for _ in range(len(split_genome))]
+        #print(split_genome)
+        #print(flip_contigs)
 
         for index, contig in enumerate(split_genome):
             if flip_contigs[index]:
-                split_genome[index] = " ".join([str(int(x) * -1) for x in contig.split()][::-1])
+                split_genome[index] = " ".join([str(int(x) * -1) for x in contig.strip().split()][::-1])
+            else:
+                split_genome[index] = contig.strip()
 
+        #print(split_genome)
         random.shuffle(split_genome)
         genome = "_ " + " _ ".join(split_genome) + " _"
 
@@ -706,7 +713,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     if DDP_active:
         map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
         dist.barrier()
-    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, model_save_path, restart, map_location)
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, lr_scheduler, model_save_path, restart, map_location)
 
     if rank == 0:
         if is_checkpoint_loaded:
@@ -785,7 +792,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             
             if avg_val_loss <= early_stopping.best_loss:
                 print("Saving model checkpoint.", flush=True)
-                save_checkpoint(model, optimizer, epoch, avg_train_loss, model_save_path)
+                save_checkpoint(model, optimizer, epoch, avg_train_loss, lr_scheduler, model_save_path)
 
             gc.collect()
             writer.close()
