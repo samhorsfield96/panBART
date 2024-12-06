@@ -121,7 +121,10 @@ def parse_args():
     a Namespace object containing the parsed arguments.
     """
     parser = argparse.ArgumentParser(description="Train a transformer model on (pan)'omic data.")
-    parser.add_argument("--input_file", type=str, required=True, help="Path to the input file")
+    parser.add_argument("--input_file", type=str, default=None, help="Path to the input file")
+    parser.add_argument("--train_file", type=str, default=None, help="Path to the training input file")
+    parser.add_argument("--val_file", type=str, default=None, help="Path to the validation input file")
+    parser.add_argument("--test_file", type=str, default=None, help="Path to the test input file")
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
@@ -866,6 +869,9 @@ def main():
     params = vars(args)  # Convert the parsed arguments to a dictionary
 
     input_file = args.input_file
+    train_file = args.train_file
+    val_file = args.val_file
+    test_file = args.test_file
     device = args.device
     attention_window=args.attention_window
     embed_dim = args.embed_dim
@@ -892,33 +898,50 @@ def main():
         logging.info("Please adjust these values and try again.")
         exit(1)
 
+    if input_file != None:
+        # Check whether certain files exist
+        if not os.path.isfile(input_file):
+            print(f"Error: The specified input file '{input_file}' does not exist.")
+            exit(1)
+        genomes = load_dataset(input_file)
+            # remove sequences that are too long or short
+        if max_input_len != None:
+            genomes = [genome for genome in genomes if len(genome.split()) <= max_input_len]
 
-    # Check whether certain files exist
-    if not os.path.isfile(input_file):
-        print(f"Error: The specified input file '{input_file}' does not exist.")
-        exit(1)
+        if min_input_len != None:
+            genomes = [genome for genome in genomes if len(genome.split()) >= min_input_len]
+    else:
+        # read in pre-split genomes
+        train_genomes = load_dataset(train_file)
+        val_genomes = load_dataset(val_file)
+        test_genomes = load_checkpoint(test_file)
+        if max_input_len != None:
+            train_genomes = [genome for genome in train_genomes if len(genome.split()) <= max_input_len]
+            val_genomes = [genome for genome in val_genomes if len(genome.split()) <= max_input_len]
+            test_genomes = [genome for genome in test_genomes if len(genome.split()) <= max_input_len]
+
+        if min_input_len != None:
+            train_genomes = [genome for genome in train_genomes if len(genome.split()) >= min_input_len]
+            val_genomes = [genome for genome in val_genomes if len(genome.split()) >= min_input_len]
+            test_genomes = [genome for genome in test_genomes if len(genome.split()) >= min_input_len]
+
+        # combine for tokenizer
+        genomes = train_genomes + val_genomes + test_genomes
+
+
     if model_save_path and not os.path.isdir(os.path.dirname(model_save_path)):
         print(f"Error: The directory for model save path '{model_save_path}' does not exist.")
         exit(1)
     
+    # generate tokenizer information
     set_seed(args.seed)
-
     print_parameters_table(params)
-
-    genomes = load_dataset(input_file)
     unique_tokens = set(token for genome in genomes for token in genome.split())
     actual_vocab_size = int(len(unique_tokens))
     if max_vocab_size is not None:
         vocab_size = min(actual_vocab_size, max_vocab_size)
     else:
         vocab_size = actual_vocab_size
-    
-    # remove sequences that are too long or short
-    if max_input_len != None:
-        genomes = [genome for genome in genomes if len(genome.split()) <= max_input_len]
-
-    if min_input_len != None:
-        genomes = [genome for genome in genomes if len(genome.split()) >= min_input_len]
     
     sequence_lengths = [len(genome.split()) for genome in genomes]
     num_sequences = len(genomes)
@@ -982,14 +1005,19 @@ def main():
         else:
             device = torch.device("cpu")
 
-    if train_size + val_size > 1.0:
-        raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
-    if train_size + val_size == 1.0:
-        train_genomes, val_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
-        test_genomes = []
-    else:
-        train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
-        val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
+    # split genomes if required
+    if input_file != None
+        if train_size + val_size > 1.0:
+            raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
+        if train_size + val_size == 1.0:
+            train_genomes, val_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
+            test_genomes = []
+        else:
+            train_genomes, temp_genomes = train_test_split(genomes, train_size=train_size, random_state=seed)
+            val_genomes, test_genomes = train_test_split(temp_genomes, test_size=1.0 - val_size / (1.0 - train_size), random_state=seed)
+
+    # delete genomes list from memory
+    del genomes
 
     # print test genomes to file
     if len(test_genomes) > 0 and args.save_test_data:
