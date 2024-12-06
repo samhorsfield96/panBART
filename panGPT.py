@@ -914,7 +914,7 @@ def main():
         # read in pre-split genomes
         train_genomes = load_dataset(train_file)
         val_genomes = load_dataset(val_file)
-        test_genomes = load_checkpoint(test_file)
+        test_genomes = load_dataset(test_file)
         if max_input_len != None:
             train_genomes = [genome for genome in train_genomes if len(genome.split()) <= max_input_len]
             val_genomes = [genome for genome in val_genomes if len(genome.split()) <= max_input_len]
@@ -1006,7 +1006,7 @@ def main():
             device = torch.device("cpu")
 
     # split genomes if required
-    if input_file != None
+    if input_file != None:
         if train_size + val_size > 1.0:
             raise ValueError("The sum of train_size and val_size must be less than or equal to 1.0")
         if train_size + val_size == 1.0:
