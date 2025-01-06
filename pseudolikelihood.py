@@ -127,11 +127,11 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
 
                     # iterate over whole sequence for masking
-                    padding_positions = (batch_encoder_input == pad_token).nonzero(as_tuple=True)
-                    if padding_positions[0].numel() > 0:
-                        token_count = padding_positions[0][0].item()  # Position of the first padding token
-                    else:
-                        token_count = max_seq_length
+                    token_count = max_seq_length
+                    for j in range(len(batch_encoder_input[0])):
+                        if batch_encoder_input[0, j] == pad_token:
+                            token_count = j
+                            break
                         
                     for j in tqdm(range(token_count)):
                         masked_encoder_input = batch_encoder_input.clone()
@@ -148,10 +148,12 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
 
                         if per_gene:
                             gene_dict[original_token_id].append(log_pseudo_likelihood_gene)
+                        
+                        # Free GPU memory
+                        del masked_encoder_input
 
                     # Free GPU memory
                     del batch_encoder_input
-                    del masked_encoder_input
                     del batch_encoder_attention_mask
                     del batch_global_attention_mask
 
@@ -159,11 +161,11 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
                     
                     # iterate over whole sequence for masking
-                    padding_positions = (batch_encoder_input == pad_token).nonzero(as_tuple=True)
-                    if padding_positions[0].numel() > 0:
-                        token_count = padding_positions[0][0].item()  # Position of the first padding token
-                    else:
-                        token_count = max_seq_length
+                    token_count = max_seq_length
+                    for j in range(len(batch_encoder_input[0])):
+                        if batch_encoder_input[0, j] == pad_token:
+                            token_count = j
+                            break
 
                     for j in tqdm(range(token_count)):
                         masked_encoder_input = batch_encoder_input.clone()
@@ -180,8 +182,10 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                         if per_gene:
                             gene_dict[original_token_id].append(log_pseudo_likelihood_gene)
 
+                        # Free GPU memory
+                        del masked_encoder_input
+                    
                     # Free GPU memory
-                    del masked_encoder_input
                     del batch_encoder_input
                     del batch_encoder_attention_mask
                     del batch_decoder_input
