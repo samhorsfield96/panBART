@@ -108,7 +108,6 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
     #print(len(labels))
 
     sequence_embeddings = []
-    print(sequence_embeddings)
 
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
@@ -121,71 +120,43 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
                 batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device) # Move data to the appropriate device
                 
                 outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask, output_hidden_states=True)  # Generate predictions
-                last_hidden_state = outputs.encoder_last_hidden_state.cpu()
-
-                # Free GPU memory
-                del batch_encoder_input
-                del batch_encoder_attention_mask
-                del batch_global_attention_mask
+                last_hidden_state = outputs.encoder_last_hidden_state
 
             else:
                 batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input.to(device), encoder_input.to(device), decoder_attention_mask.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device) # Move data to the appropriate device
                 
-                
                 outputs = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask, output_hidden_states=True)  # Generate predictions
-                #decoder_hidden_states = outputs.decoder_hidden_states
-                last_hidden_state = outputs.decoder_hidden_states[-1].cpu()
-
-                # Free GPU memory
-                del batch_encoder_input
-                del batch_encoder_attention_mask
-                del batch_decoder_input
-                del batch_decoder_attention_mask
-                del batch_global_attention_mask
+                last_hidden_state = outputs.decoder_hidden_states[-1]
             
-            sequence_embeddings.append(last_hidden_state)
-            print(last_hidden_state)
+            # average all hidden states for all tokens
+            masked_hidden_state = last_hidden_state * batch_encoder_attention_mask.unsqueeze(-1)
+            #print(masked_hidden_state)
+            
+            # Count the number of non-padded tokens (tokens with attention mask 1)
+            non_padded_tokens = batch_encoder_attention_mask.sum(dim=1).unsqueeze(-1)
 
-    print(sequence_embeddings)
-    #print(len(label_set))
-    #print(label_set)
-    # calculate average embeddings
-    token_avg_embeddings = {}
-    fail
+            # Avoid division by zero in case there are no non-padded tokens (for empty sequences)
+            non_padded_tokens = torch.clamp(non_padded_tokens, min=1)
+            #print(non_padded_tokens)
 
-    # generate torch tensor of average embeddings
-    token_list = list(token_avg_embeddings.values())
-    tokens = [tokenizer.decode([x]) for x in token_avg_embeddings.keys()]
-    token_embeddings = torch.stack(token_list)  # Shape: (num_tokens, hidden_size)
-    # print("token_embeddings")
-    # print(token_embeddings)
-    # print(token_embeddings.shape)
+            # Compute the average over the non-padded tokens
+            sentence_embedding = masked_hidden_state.sum(dim=1) / non_padded_tokens.float()
 
-    # Normalize the embeddings
-    normalized_embeddings = torch.nn.functional.normalize(token_embeddings, p=2, dim=1)
-    # print("normalized_embeddings")
-    # print(normalized_embeddings)
-    # print(normalized_embeddings.shape)
+            # Append to list
+            sequence_embeddings.append(sentence_embedding.cpu())
+            #print(sentence_embedding)
+            #print(sentence_embedding.shape)
 
-
-    # Compute pairwise cosine similarities
-    cosine_similarities = torch.mm(normalized_embeddings, normalized_embeddings.T)
-    # print("cosine_similarities")
-    # print(cosine_similarities)
-    # print(cosine_similarities.shape)
-
-    # Step 3: Construct the pairwise cosine similarity matrix
-    cosine_similarities = torch.clamp(cosine_similarities, min=-1.0, max=1.0)
-    cosine_similarity_matrix = cosine_similarities.squeeze(0).cpu().numpy()
-
-    # print("cosine_similarity_matrix")
-    # print(cosine_similarity_matrix)
-    # print(cosine_similarities.shape)
+    #print(sequence_embeddings)
+    # Stack them into a single 2D array
+    stacked_array = np.vstack(sequence_embeddings)
+    #print(stacked_array)
+    #print(stacked_array.shape)
     
-    df = pd.DataFrame(cosine_similarity_matrix, index=tokens, columns=tokens)
+    df = pd.DataFrame(stacked_array)
 
     # Display the DataFrame
-    df.to_csv(outpref + ".csv", index=True)
+    df.to_csv(outpref + ".csv", index=False, header=False)
 
 
 def read_prompt_file(file_path):
