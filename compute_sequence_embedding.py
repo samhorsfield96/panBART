@@ -111,7 +111,7 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
 
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
-        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
+        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in tqdm(loader, desc="Genome iteration", unit="batch"):  # Correctly unpack the tuples returned by the DataLoader
 
             total_len = encoder_input.size(1)
 
