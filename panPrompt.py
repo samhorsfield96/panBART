@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
     parser.add_argument("--generate", default=False, action="store_true", help="Generate iteratively instead of as a block.")
+    parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
 
     args = parser.parse_args()
 
@@ -111,7 +112,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
@@ -120,6 +121,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         self.pad_token = self.tokenizer.encode("<pad>").ids[0]
         self.bos_token = self.tokenizer.encode("<s>").ids[0]
         self.eos_token = self.tokenizer.encode("</s>").ids[0]
+        self.global_contig_breaks = global_contig_breaks
 
     def __len__(self):
         return len(self.texts)
@@ -176,8 +178,9 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         # attend to all contig breaks
         global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
-        break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
-        global_attention_mask[break_idx] = 1
+        if self.global_contig_breaks:
+            break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
+            global_attention_mask[break_idx] = 1
 
         # print("labels")
         # print(len(labels))
@@ -403,7 +406,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked, args.global_contig_breaks)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     

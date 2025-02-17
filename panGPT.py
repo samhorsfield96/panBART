@@ -157,7 +157,7 @@ def parse_args():
     parser.add_argument("--gradient_checkpointing", default=False, action="store_true", help="Use gradient checkpointing during training. Improves memory efficiency at cost to runtime.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
     parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
-
+    parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
     
     args = parser.parse_args()
 
@@ -480,7 +480,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
@@ -489,6 +489,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         self.pad_token = self.tokenizer.encode("<pad>").ids[0]
         self.bos_token = self.tokenizer.encode("<s>").ids[0]
         self.eos_token = self.tokenizer.encode("</s>").ids[0]
+        self.global_contig_breaks = global_contig_breaks
 
     def __len__(self):
         return len(self.texts)
@@ -585,8 +586,9 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         # attend to all contig breaks
         global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
-        break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
-        global_attention_mask[break_idx] = 1
+        if self.global_contig_breaks:
+            break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
+            global_attention_mask[break_idx] = 1
 
         # print("labels")
         # print(len(labels))
@@ -663,6 +665,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     prop_masked = args.prop_masked
     restart = args.restart
     num_workers = args.num_workers
+    global_contig_breaks = args.global_contig_breaks
 
     # determine number of GPUs to use
     #num_gpus = torch.cuda.device_count()
@@ -693,14 +696,14 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         shuffle = True
     
     # training dataset
-    train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked)
+    train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked, global_contig_breaks)
     train_dataset.attention_window = attention_window
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=train_sampler)
     train_dataset_size = len(train_loader.dataset)
 
     # validation dataset
     
-    val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked)
+    val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, global_contig_breaks)
     val_dataset.attention_window = attention_window
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=val_sampler)
     val_dataset_size = len(val_loader.dataset)
@@ -810,7 +813,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             break
 
     if len(test_genomes) > 0:
-        test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked)
+        test_dataset = GenomeDataset(test_genomes, tokenizer, max_seq_length, prop_masked, global_contig_breaks)
         test_dataset.attention_window = attention_window
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=test_sampler)
         #test_loader.sampler.set_epoch(epoch)
