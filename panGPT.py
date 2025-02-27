@@ -51,33 +51,6 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def print_banner():
-    """
-    Print the program banner with information about the program name, version, and author.
-
-    This function prints the banner with the program name, version, and author information,
-    along with additional disclaimer and license details.
-    """
-    border_symbol = "="
-    padding_outer = 5
-    padding_inner = 3
-    full_program_name = f"{PROGRAM_NAME} v{VERSION}"
-    line_length = len(full_program_name) + 2 * padding_inner
-    border_line = border_symbol * (line_length + 2 * padding_outer)
-
-    print(border_line)
-    print(f"{border_symbol * padding_outer}{' ' * padding_inner}{full_program_name}{' ' * padding_inner}{border_symbol * padding_outer}")
-    print(border_line)
-    print(f"Developed by: {AUTHOR}")
-    print("Website: http://mcinerneylab.com/")
-    print("DISCLAIMER: This code is provided 'AS IS' without any warranties of any kind, including,")
-    print("but not limited to, its fitness for a particular purpose. The author disclaims all ")
-    print("liability for any damages, direct, indirect, tangential, incidental or consequential, ")
-    print("resulting from the use of this code.")
-    print("Licensed under the GNU General Public License v3.0")
-    print("Full license at: https://www.gnu.org/licenses/gpl-3.0.en.html")
-    print(border_line)
-
 def mask_integers(string, prop_masked):   
    
     # Randomly select indices to mask
@@ -963,8 +936,6 @@ def main():
         trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
         tokenizer.train_from_iterator(genomes, trainer)
         tokenizer.save(tokenizer_path)
-
-    print_banner()
 
     tokenizer = Tokenizer.from_file(tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
