@@ -103,6 +103,7 @@ def parse_args():
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
     parser.add_argument("--seed", default=42, type=int, help="Seed for randomisation")
     parser.add_argument("--randomise", action="store_true", default=False, help="Randomise input tokens.")
+    parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
 
     args = parser.parse_args()
 
