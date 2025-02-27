@@ -203,18 +203,6 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
 
-def print_banner():
-    banner = '''
-    **************************************************
-    *                                                *
-    *        Transformer Model Token Prediction      *
-    *        panPrompt v0.1.0                        *
-    *        author: Samuel Horsfield                *
-    *                                                *
-    **************************************************
-    '''
-    print(banner)
-
 def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window, model_dropout_rate):
 
     BARTlongformer_config = LEDConfig(
@@ -435,7 +423,6 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
         
 def main():
-    print_banner()
     args = parse_args()
 
     tokenizer = Tokenizer.from_file(args.tokenizer_path)
