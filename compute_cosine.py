@@ -15,7 +15,7 @@ import torch.multiprocessing as mp
 from panGPT import setup, cleanup
 import random
 from torch.utils.data import DataLoader, DistributedSampler
-from panPrompt import GenomeDataset, load_dataset
+from panGPT import GenomeDataset, load_dataset
 from collections import defaultdict
 from torch.nn.functional import cosine_similarity
 import pandas as pd
@@ -241,7 +241,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
