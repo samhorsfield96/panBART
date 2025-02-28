@@ -119,40 +119,16 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
             # average all hidden states for all tokens
             masked_hidden_state = last_hidden_state * batch_encoder_attention_mask.unsqueeze(-1)
             #print(masked_hidden_state)
-            print(f"encoder_attention_mask: {encoder_attention_mask}", file=sys.stderr)
-            print(f"encoder_attention_mask shape: {encoder_attention_mask.shape}", file=sys.stderr)
             
             # Count the number of non-padded tokens (tokens with attention mask 1)
+            # Avoid division by zero in case there are no non-padded tokens (for empty sequences)
             non_padded_tokens = batch_encoder_attention_mask.sum(dim=1).unsqueeze(-1)
             non_padded_tokens = non_padded_tokens.float() if non_padded_tokens.float() > 0 else 1
-
-            # Avoid division by zero in case there are no non-padded tokens (for empty sequences)
-            #non_padded_tokens = torch.clamp(non_padded_tokens, min=1)
-            #print(non_padded_tokens)
 
             # Compute the average over the non-padded tokens
             sentence_embedding = masked_hidden_state.sum(dim=1) / non_padded_tokens
 
-            print(f"decoder_input: {decoder_input}")
-            print(f"encoder_input: {encoder_input}")
-            print(f"decoder_attention_mask: {decoder_attention_mask}")
-            print(f"encoder_attention_mask: {encoder_attention_mask}")
-            print(f"global_attention_mask: {global_attention_mask}")
-            print(f"non_padded_tokens: {non_padded_tokens}")
-            print(f"last_hidden_state: {last_hidden_state}")
-            print(f"masked_hidden_state: {masked_hidden_state}")
-            print(f"batch_encoder_attention_mask: {batch_encoder_attention_mask}")
-
-            # Append to list
-            try:
-                torch.cuda.synchronize()
-                sequence_embeddings.append(sentence_embedding.cpu())
-            except:
-                print("Error")
-                sequence_embeddings.append(sentence_embedding.cpu())
-                
-            #print(sentence_embedding)
-            #print(sentence_embedding.shape)
+            sequence_embeddings.append(sentence_embedding.cpu())
 
     #print(sequence_embeddings)
     # Stack them into a single 2D array
