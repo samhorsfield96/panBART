@@ -15,10 +15,11 @@ import torch.multiprocessing as mp
 from panGPT import setup, cleanup
 import random
 from torch.utils.data import DataLoader, DistributedSampler
-from panPrompt import GenomeDataset, load_dataset
+from panGPT import GenomeDataset, load_dataset
 from collections import defaultdict
 from torch.nn.functional import cosine_similarity
 import pandas as pd
+import sys
 
 logging.set_verbosity_error()
 
@@ -57,20 +58,6 @@ def parse_args():
     args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
 
     return args
-
-def pad_input(input, max_length, pad_token_id, labels=False):
-
-    len_masked = len(input)
-    # only pad if necessary
-    if len_masked >= max_length:
-        pass
-    else:
-        if labels == False:
-            input.extend([pad_token_id] * (max_length - len_masked))
-        else:
-            input.extend([-100] * (max_length - len_masked))
-
-    return input
 
 def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window, model_dropout_rate):
 
@@ -132,19 +119,38 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
             # average all hidden states for all tokens
             masked_hidden_state = last_hidden_state * batch_encoder_attention_mask.unsqueeze(-1)
             #print(masked_hidden_state)
+            print(f"encoder_attention_mask: {encoder_attention_mask}", file=sys.stderr)
+            print(f"encoder_attention_mask shape: {encoder_attention_mask.shape}", file=sys.stderr)
             
             # Count the number of non-padded tokens (tokens with attention mask 1)
             non_padded_tokens = batch_encoder_attention_mask.sum(dim=1).unsqueeze(-1)
+            non_padded_tokens = non_padded_tokens.float() if non_padded_tokens.float() > 0 else 1
 
             # Avoid division by zero in case there are no non-padded tokens (for empty sequences)
-            non_padded_tokens = torch.clamp(non_padded_tokens, min=1)
+            #non_padded_tokens = torch.clamp(non_padded_tokens, min=1)
             #print(non_padded_tokens)
 
             # Compute the average over the non-padded tokens
-            sentence_embedding = masked_hidden_state.sum(dim=1) / non_padded_tokens.float()
+            sentence_embedding = masked_hidden_state.sum(dim=1) / non_padded_tokens
+
+            print(f"decoder_input: {decoder_input}")
+            print(f"encoder_input: {encoder_input}")
+            print(f"decoder_attention_mask: {decoder_attention_mask}")
+            print(f"encoder_attention_mask: {encoder_attention_mask}")
+            print(f"global_attention_mask: {global_attention_mask}")
+            print(f"non_padded_tokens: {non_padded_tokens}")
+            print(f"last_hidden_state: {last_hidden_state}")
+            print(f"masked_hidden_state: {masked_hidden_state}")
+            print(f"batch_encoder_attention_mask: {batch_encoder_attention_mask}")
 
             # Append to list
-            sequence_embeddings.append(sentence_embedding.cpu())
+            try:
+                torch.cuda.synchronize()
+                sequence_embeddings.append(sentence_embedding.cpu())
+            except:
+                print("Error")
+                sequence_embeddings.append(sentence_embedding.cpu())
+                
             #print(sentence_embedding)
             #print(sentence_embedding.shape)
 
@@ -161,6 +167,7 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
 
 
 def read_prompt_file(file_path):
+
     prompt_list = []
     with open(file_path, 'r') as file:
         for line in file:
@@ -186,7 +193,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     

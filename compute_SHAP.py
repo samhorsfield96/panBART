@@ -15,7 +15,6 @@ import torch.multiprocessing as mp
 from panGPT import setup, cleanup
 import random
 from torch.utils.data import DataLoader, DistributedSampler
-from panPrompt import GenomeDataset, load_dataset
 from functools import partial
 import shap
 import scipy as sp
@@ -24,17 +23,44 @@ import pandas as pd
 
 logging.set_verbosity_error()
 
+def load_dataset(input_file):
+    """
+    Load the dataset from the input file.
+
+    Args:
+    - input_file (str): Path to the input file containing the dataset.
+
+    Returns:
+    - list: List of strings, each representing a genome sequence.
+
+    This function reads the contents of the input file, which contains genome sequences,
+    and returns a list of genome sequences.
+    """
+    try:
+        with open(input_file, "r") as file:
+            genomes = ["_ " + genome.strip() + " _" for genome in file.readlines()]
+        return genomes
+    except FileNotFoundError:
+        print(f"Error: The input file '{input_file}' was not found.")
+        exit(1)
+    except Exception as e:
+        print(f"An error occurred while reading the file: {e}")
+        exit(1)
+
 def pad_input(input, max_seq_length, pad_token_id, labels=False):
 
     len_masked = len(input)
+
+    # cut sequence to correct length
+    if len_masked > max_seq_length:
+        input = input[:max_seq_length]
+    len_masked = len(input)
+    
     # only pad if necessary
-    if len_masked >= max_seq_length:
-        pass
+    if labels == False:
+        input.extend([pad_token_id] * (max_seq_length - len_masked))
     else:
-        if labels == False:
-            input.extend([pad_token_id] * (max_seq_length - len_masked))
-        else:
-            input.extend([-100] * (max_seq_length - len_masked))
+        input.extend([-100] * (max_seq_length - len_masked))
 
     return input
 

@@ -453,7 +453,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
@@ -463,6 +463,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         self.bos_token = self.tokenizer.encode("<s>").ids[0]
         self.eos_token = self.tokenizer.encode("</s>").ids[0]
         self.global_contig_breaks = global_contig_breaks
+        self.shuffle = shuffle
 
     def __len__(self):
         return len(self.texts)
@@ -470,20 +471,22 @@ class GenomeDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         text = self.texts[idx]
 
-        # randomise contig order and flip randomly
         split_genome = text.split("_")
-        flip_contigs = [random.random() < 0.5 for _ in range(len(split_genome))]
-        #print(split_genome)
-        #print(flip_contigs)
+        # randomise contig order and flip randomly
+        if self.shuffle:
+            flip_contigs = [random.random() < 0.5 for _ in range(len(split_genome))]
+            #print(split_genome)
+            #print(flip_contigs)
 
-        for index, contig in enumerate(split_genome):
-            if flip_contigs[index]:
-                split_genome[index] = " ".join([str(int(x) * -1) for x in contig.strip().split()][::-1])
-            else:
-                split_genome[index] = contig.strip()
+            for index, contig in enumerate(split_genome):
+                if flip_contigs[index]:
+                    split_genome[index] = " ".join([str(int(x) * -1) for x in contig.strip().split()][::-1])
+                else:
+                    split_genome[index] = contig.strip()
 
-        #print(split_genome)
-        random.shuffle(split_genome)
+            #print(split_genome)
+            random.shuffle(split_genome)
+        
         genome = "_ " + " _ ".join(split_genome) + " _"
 
         input = self.tokenizer.encode(genome).ids
