@@ -51,6 +51,9 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
+def flip_contig(contig):
+    return " ".join([str(int(x) * -1) for x in contig.strip().split()][::-1])
+
 def mask_integers(string, prop_masked):   
    
     # Randomly select indices to mask
@@ -471,7 +474,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         text = self.texts[idx]
 
-        split_genome = text.split("_")
+        split_genome = text.strip().split("_")
         # randomise contig order and flip randomly
         if self.shuffle:
             flip_contigs = [random.random() < 0.5 for _ in range(len(split_genome))]
@@ -480,7 +483,7 @@ class GenomeDataset(torch.utils.data.Dataset):
 
             for index, contig in enumerate(split_genome):
                 if flip_contigs[index]:
-                    split_genome[index] = " ".join([str(int(x) * -1) for x in contig.strip().split()][::-1])
+                    split_genome[index] = flip_contig(contig.strip())
                 else:
                     split_genome[index] = contig.strip()
 
@@ -907,6 +910,18 @@ def main():
         # combine for tokenizer
         genomes = train_genomes + val_genomes + test_genomes
 
+    # genenerate reversed contigs for tokenizer
+    reversed_genomes = []
+    for genome in genomes:
+        split_genome = genome.strip().split("_")
+        # randomise contig order and flip randomly
+        for index, contig in enumerate(split_genome):
+            split_genome[index] = flip_contig(contig.strip())
+        
+        rev_genome = " _ ".join(split_genome)
+        reversed_genomes.append(rev_genome)
+
+    #print(reversed_genomes)
 
     if model_save_path and not os.path.isdir(os.path.dirname(model_save_path)):
         print(f"Error: The directory for model save path '{model_save_path}' does not exist.")
@@ -916,6 +931,7 @@ def main():
     set_seed(args.seed)
     print_parameters_table(params)
     unique_tokens = set(token for genome in genomes for token in genome.split())
+    unique_tokens.update(set(token for genome in reversed_genomes for token in genome.split()))
     actual_vocab_size = int(len(unique_tokens))
     if max_vocab_size is not None:
         vocab_size = min(actual_vocab_size, max_vocab_size)
@@ -937,7 +953,7 @@ def main():
         tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
         tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
         trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
-        tokenizer.train_from_iterator(genomes, trainer)
+        tokenizer.train_from_iterator(genomes + reversed_genomes, trainer)
         tokenizer.save(tokenizer_path)
 
     tokenizer = Tokenizer.from_file(tokenizer_path)
