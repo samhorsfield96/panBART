@@ -15,11 +15,12 @@ import torch.multiprocessing as mp
 from panGPT import setup, cleanup
 import random
 from torch.utils.data import DataLoader, DistributedSampler
-from panGPT import GenomeDataset, load_dataset
+from panGPT import GenomeDataset
 from collections import defaultdict
 from torch.nn.functional import cosine_similarity
 import pandas as pd
 import sys
+import re
 
 logging.set_verbosity_error()
 
@@ -34,6 +35,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
     parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
     parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
+    parser.add_argument('--labels', default=None, help='csv file describing genome names in first column in same order as in embeddings file. No header. Can have second column with assigned clusters.')
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
     parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
@@ -58,6 +60,10 @@ def parse_args():
     args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
 
     return args
+
+def has_exact_match(text, word):
+    pattern = rf"(^|\W){re.escape(word)}(\W|$)"
+    return bool(re.search(pattern, text))
 
 def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_size, attention_window, model_dropout_rate):
 
@@ -142,13 +148,44 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
     df.to_csv(outpref + ".csv", index=False, header=False)
 
 
-def read_prompt_file(file_path):
+def read_prompt_file(file_path, genome_labels):
 
+    order = False
+    # ensure genomes are placed in the same order and are present
+    if len(genome_labels) > 0:
+        order = True
+
+    genome_id_list = []
     prompt_list = []
     with open(file_path, 'r') as file:
         for line in file:
-            prompt_list.append(line.strip())
-    return prompt_list
+            if order:
+                split_line = line.strip().split("\t")
+                genome_id_list.append(split_line[0])
+                prompt_list.append(split_line[1])
+            else:
+                prompt_list.append(line.strip())
+    
+    # determine order of genomes and reorder if required
+    if order:
+        order_list = [None] * len(genome_labels)
+        for label_idx, label in enumerate(genome_labels):
+            for genome_idx, genome_id in enumerate(genome_id_list):
+                if has_exact_match(genome_id, label):
+                    order_list[label_idx] = genome_idx
+                    break
+        
+        reordered_prompt_list = []
+        reordered_genome_id_list = []
+        for element in order_list:
+            reordered_prompt_list.append(prompt_list[element])
+            reordered_genome_id_list.append(genome_id_list[element])
+        #print(order_list)
+        #print(genome_id_list)
+        #print(reordered_genome_id_list)
+        return reordered_prompt_list
+    else:
+        return prompt_list
 
 def split_prompts(prompts, world_size):
     # Split prompts into approximately equal chunks for each GPU
@@ -242,7 +279,16 @@ def main():
         else:
             device = torch.device("cpu")
 
-    prompt_list = load_dataset(args.prompt_file)
+    genome_labels = []
+    if args.labels != None:
+        with open(args.labels, "r") as i:
+            for line in i:
+                split_line = line.split(",")
+                genome_name = split_line[0]
+                genome_labels.append(genome_name)
+
+    #print(genome_labels)
+    prompt_list = read_prompt_file(args.prompt_file, genome_labels)
 
     # randomise
     if args.randomise:
