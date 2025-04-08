@@ -214,74 +214,54 @@ def load_dataset(input_file):
         print(f"An error occurred while reading the file: {e}")
         exit(1)
 
-def save_checkpoint(model, optimizer, epoch, loss, lr_scheduler, save_path):
+def save_checkpoint(model_engine, epoch, loss, save_dir, lr_scheduler=None):
     """
-    Save the model checkpoint to a file.
-
-    Args:
-    - model: The PyTorch model to save.
-    - optimizer: The optimizer state associated with the model.
-    - epoch (int): The current epoch number.
-    - loss: The loss value at the current epoch.
-    - save_path (str): Path to save the model checkpoint file.
-
-    This function saves the model checkpoint, including the model state dictionary,
-    optimizer state dictionary, current epoch number, and loss value, to the specified file.
+    Save the DeepSpeed model engine's checkpoint (model, optimizer, lr scheduler, etc).
     """
-
     try:
-        checkpoint = {
+        # client_state can hold any custom info you want to save
+        client_state = {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "lr_scheduler" : lr_scheduler,
             "loss": loss,
         }
-        torch.save(checkpoint, save_path)
-    except IOError as e:
-        print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, lr_scheduler, checkpoint_path, restart, rank, map_location=None):
-    """
-    Load a model checkpoint from a file.
+        # If you have a learning rate scheduler, save its state
+        if lr_scheduler:
+            client_state["lr_scheduler_state"] = lr_scheduler.state_dict()
 
-    Args:
-    - model: The PyTorch model to load the checkpoint into.
-    - optimizer: The optimizer associated with the model.
-    - checkpoint_path (str): Path to the model checkpoint file.
-
-    Returns:
-    - tuple: A tuple containing the start epoch number and a boolean indicating
-             whether the checkpoint was successfully loaded.
-
-    This function loads a model checkpoint from the specified file into the given model
-    and optimizer. It returns the start epoch number and a boolean indicating whether
-    the checkpoint was successfully loaded.
-    """
-
-    if not os.path.exists(checkpoint_path):
-        print("No checkpoint found. Starting from scratch.")
-        return 0, False
-    try:
-        if restart:
-            print("Restarting training, overwriting existing checkpoint.")
-            return 0, False
-        if map_location != None:
-            checkpoint = torch.load(checkpoint_path, map_location=map_location)
-        else:
-            checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        lr_scheduler = checkpoint["lr_scheduler"]
-        start_epoch = checkpoint["epoch"] + 1
-        print(f"Checkpoint loaded. Resuming training from epoch {start_epoch}")
-        return start_epoch, True
+        model_engine.save_checkpoint(save_dir, client_state=client_state)
+        if model_engine.global_rank == 0:
+            print(f"Saved DeepSpeed checkpoint at {save_dir}/global_step{epoch}")
     except Exception as e:
-        if "size mismatch" in str(e):
-            error_msg = "Error: Checkpoint and current model do not match in size."
-        else:
-            error_msg = f"Error loading checkpoint from '{checkpoint_path}': {str(e)}"
-        logging.error(error_msg)
+        print(f"Failed to save checkpoint: {e}")
+
+def load_checkpoint(model_engine, load_dir,restart=False, lr_scheduler=None):
+    """
+    Load a DeepSpeed model checkpoint from directory, including the learning rate scheduler.
+    """
+    if not os.path.exists(load_dir) or restart:
+        print("No checkpoint found or restarting training. Starting from scratch.")
+        return 0, False
+
+    try:
+        success, client_state = model_engine.load_checkpoint(load_dir)
+        if not success:
+            print("Failed to load checkpoint. Starting from scratch.")
+            return 0, False
+
+        # You can pass epoch and loss through client_state
+        start_epoch = client_state.get("epoch", 0) + 1
+        print(f"Loaded checkpoint from {load_dir}, resuming at epoch {start_epoch}")
+        
+        # If a lr_scheduler was saved, restore it
+        if lr_scheduler and "lr_scheduler_state" in client_state:
+            lr_scheduler.load_state_dict(client_state["lr_scheduler_state"])
+            print(f"Loaded learning rate scheduler state.")
+
+        return start_epoch, True
+
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
         return 0, False
 
 def train_model(train_loader, model, optimizer, criterion, device, vocab_size, encoder_only, epoch):
@@ -674,7 +654,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate * math.sqrt(world_size), weight_decay=weight_decay) # How are we trying to optimizer it?
     lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
 
-    #start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, lr_scheduler, model_save_path, restart, map_location)
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, model_save_path, restart, lr_scheduler)
 
     if rank == 0:
         if is_checkpoint_loaded:
@@ -747,7 +727,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             
             if avg_val_loss <= early_stopping.best_loss:
                 print("Saving model checkpoint.", flush=True)
-                save_checkpoint(model_engine, optimizer, epoch, avg_train_loss, lr_scheduler, model_save_path)
+                save_checkpoint(model_engine, epoch, avg_train_loss, model_save_path, lr_scheduler)
 
             gc.collect()
             writer.close()
