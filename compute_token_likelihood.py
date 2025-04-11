@@ -23,6 +23,19 @@ from statistics import mean
 
 logging.set_verbosity_error()
 
+def insert_tensor(tensor, value_tensor, insert_pos):
+    num_insertions = value_tensor.numel()
+    # shift values down
+    #print(tensor[0, insert_pos], file=sys.stderr)
+    #print(tensor, file=sys.stderr)
+    tensor[0, insert_pos + num_insertions:] = tensor[0, insert_pos:-num_insertions].clone()
+    
+    # Insert new values
+    tensor[0, insert_pos:insert_pos + num_insertions] = value_tensor
+    #print(tensor[0, insert_pos], file=sys.stderr)
+    #print(tensor, file=sys.stderr)
+    #return tensor
+
 def generate_gene_id(unsplit_id):
     name = unsplit_id.split("SAM")[1].split("_")[0].split(".")[0]
     split_gene = unsplit_id.split("_")
@@ -106,15 +119,16 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
     model.config.use_cache = True
     return model
 
-def get_pseudolikelihood(outputs, i, token_id, batch_encoder_input):
+def get_pseudolikelihood(outputs, i, j, token_id):
+    log_pseudo_likelihood = 0
+    for pos in range(i, j):
+        logits = outputs[0, pos]
 
-    logits = outputs[0, i]
+        # Get the probability of the original token
+        token_prob = torch.softmax(logits, dim=-1)[token_id].item()
 
-    # Get the probability of the original token
-    token_prob = torch.softmax(logits, dim=-1)[token_id].item()
-
-    # Add the log probability to the total log-pseudo-likelihood
-    log_pseudo_likelihood = torch.log(torch.tensor(token_prob)).to("cpu").item()
+        # Add the log probability to the total log-pseudo-likelihood
+        log_pseudo_likelihood += torch.log(torch.tensor(token_prob)).to("cpu").item()
     
     return log_pseudo_likelihood
 
@@ -122,6 +136,13 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
     model.eval()
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
+
+    for_token_query_tensor = torch.tensor([token_id_for for gene_id, token_id_for, token_id_rev in token_query_list]).reshape(len(token_query_list),1).to(device)
+    rev_token_query_tensor = torch.tensor([token_id_rev for gene_id, token_id_for, token_id_rev in token_query_list]).reshape(len(token_query_list),1).to(device)
+    attention_mask_tensor = torch.ones(len(token_query_list), dtype=torch.long).reshape(len(token_query_list),1).to(device)
+    global_attention_mask_tensor = torch.zeros(len(token_query_list), dtype=torch.long).reshape(len(token_query_list),1).to(device)
+    addition_length = len(token_query_list)
+    gene_id = "_".join([gene_id for gene_id, token_id_for, token_id_rev in token_query_list])
 
     total_gene_list = []
     average_gene_dict = defaultdict(list)
@@ -146,26 +167,59 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                         if batch_encoder_input[0, j] == pad_token:
                             token_count = j
                             break
-                        
-                    for j in range(token_count):
+                    
+                    # extend tensors
+                    masked_batch_encoder_attention_mask = batch_encoder_attention_mask.clone()
+                    masked_batch_global_attention_mask = batch_global_attention_mask.clone()
+
+                    #masked_batch_encoder_attention_mask = 
+                    #print("masked_batch_encoder_attention_mask", file=sys.stderr)
+                    insert_tensor(masked_batch_encoder_attention_mask, attention_mask_tensor, 0)
+                    #masked_batch_global_attention_mask = 
+                    #print("masked_batch_global_attention_mask", file=sys.stderr)
+                    insert_tensor(masked_batch_global_attention_mask, global_attention_mask_tensor, 0)
+                    masked_batch_encoder_attention_mask.to(device)
+                    masked_batch_global_attention_mask.to(device)
+
+                    for j in range(0, token_count):
+                        print(f"token: {j}", file=sys.stderr)
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
                         
-                        masked_encoder_input[0, j] = mask_token
+                        # forward direction
+                        #masked_encoder_input = 
+                        #print("masked_encoder_input for", file=sys.stderr)
+                        insert_tensor(masked_encoder_input, for_token_query_tensor, j)
+                        masked_encoder_input[0, j:j + addition_length] = mask_token
                         masked_encoder_input = masked_encoder_input.to(device)
                     
-                        outputs = model(input_ids=masked_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
-
-                        for gene_id, token_id_for, token_id_rev in token_query_list:
-                            log_pseudo_likelihood_gene_for = get_pseudolikelihood(outputs, j, token_id_for, batch_encoder_input)
-                            log_pseudo_likelihood_gene_rev = get_pseudolikelihood(outputs, j, token_id_rev, batch_encoder_input)
-
-                            # take average of forward and reverse
-                            log_pseudo_likelihood_gene = (log_pseudo_likelihood_gene_for + log_pseudo_likelihood_gene_rev) / 2
-                            
-                            genome_gene_dict[gene_id].append(log_pseudo_likelihood_gene)
+                        outputs = model(input_ids=masked_encoder_input, attention_mask=masked_batch_encoder_attention_mask, global_attention_mask=masked_batch_global_attention_mask).logits  # Generate predictions
                         
+                        log_pseudo_likelihood_gene_for = 0
+                        
+                        for token_idx, token in enumerate(for_token_query_tensor):
+                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j + token_idx, token.item(), batch_encoder_input)
+                        
+                        # reverse direction
+                        masked_encoder_input = batch_encoder_input.clone()
+                        #masked_encoder_input = 
+                        #print("masked_encoder_input rev", file=sys.stderr)
+                        insert_tensor(masked_encoder_input, rev_token_query_tensor, j)
+                        masked_encoder_input[0, j:j + addition_length] = mask_token
+                        masked_encoder_input = masked_encoder_input.to(device)
+
+                        outputs = model(input_ids=masked_encoder_input, attention_mask=masked_batch_encoder_attention_mask, global_attention_mask=masked_batch_global_attention_mask).logits  # Generate predictions
+                        log_pseudo_likelihood_gene_rev = 0
+                        
+                        for token_idx, token in enumerate(rev_token_query_tensor):
+                            log_pseudo_likelihood_gene_rev += get_pseudolikelihood(outputs, j + token_idx, token.item(), batch_encoder_input)
+                        
+                        # take average of forward and reverse
+                        log_pseudo_likelihood_gene = (log_pseudo_likelihood_gene_for + log_pseudo_likelihood_gene_rev) / 2
+                            
+                        genome_gene_dict[gene_id].append(log_pseudo_likelihood_gene)
+                            
                         # Free GPU memory
                         del masked_encoder_input
 
@@ -173,6 +227,9 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     del batch_encoder_input
                     del batch_encoder_attention_mask
                     del batch_global_attention_mask
+                    del masked_batch_decoder_attention_mask
+                    del masked_batch_global_attention_mask
+                    del masked_batch_encoder_attention_mask
 
                 else:
                     batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, i:i + max_seq_length].to(device), encoder_input[:, i:i + max_seq_length].to(device), decoder_attention_mask[:, i:i + max_seq_length].to(device), encoder_attention_mask[:, i:i + max_seq_length].to(device), global_attention_mask[:, i:i + max_seq_length].to(device) # Move data to the appropriate device
@@ -184,26 +241,80 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                             token_count = j
                             break
 
-                    for j in range(token_count):
+                    # extend tensors
+                    masked_batch_encoder_attention_mask = batch_encoder_attention_mask.clone()
+                    masked_batch_global_attention_mask = batch_global_attention_mask.clone()
+                    masked_batch_decoder_attention_mask = batch_decoder_attention_mask.clone()   
+
+                    #masked_batch_encoder_attention_mask = 
+                    #print("masked_batch_encoder_attention_mask", file=sys.stderr)
+                    insert_tensor(masked_batch_encoder_attention_mask, attention_mask_tensor, 0)
+                    #masked_batch_global_attention_mask = 
+                    #print("masked_batch_global_attention_mask", file=sys.stderr)
+                    insert_tensor(masked_batch_global_attention_mask, global_attention_mask_tensor, 0)
+                    #masked_batch_decoder_attention_mask = 
+                    #print("masked_batch_decoder_attention_mask", file=sys.stderr)
+                    insert_tensor(masked_batch_decoder_attention_mask, attention_mask_tensor, 0)
+                    masked_batch_encoder_attention_mask.to(device)
+                    masked_batch_global_attention_mask.to(device)
+                    masked_batch_decoder_attention_mask.to(device)
+
+                    for j in range(0, token_count):
+                        print(f"token: {j}", file=sys.stderr)
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
-
-                        masked_encoder_input[0, j] = mask_token
+                        
+                        masked_batch_decoder_input = batch_decoder_input.clone()              
+                        
+                        # forward direction
+                        #masked_encoder_input = 
+                        #print("masked_encoder_input for", file=sys.stderr)
+                        insert_tensor(masked_encoder_input, for_token_query_tensor, j)
+                        #masked_batch_decoder_input = 
+                        #print("masked_batch_decoder_input for", file=sys.stderr)
+                        insert_tensor(masked_batch_decoder_input, for_token_query_tensor, j + 1)
+                        masked_encoder_input[0, j:j + addition_length] = mask_token
+                        masked_batch_decoder_input[0, j + 1:(j + 1) + addition_length] = mask_token
+                        masked_encoder_input = masked_encoder_input.to(device)
+                        masked_batch_decoder_input = masked_batch_decoder_input.to(device)
                     
-                        outputs = model(input_ids=masked_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
+                        outputs = model(input_ids=masked_encoder_input, attention_mask=masked_batch_encoder_attention_mask, decoder_input_ids=masked_batch_decoder_input, decoder_attention_mask=masked_batch_decoder_attention_mask, global_attention_mask=masked_batch_global_attention_mask).logits  # Generate predictions
 
-                        for gene_id, token_id_for, token_id_rev in token_query_list:
-                            log_pseudo_likelihood_gene_for = get_pseudolikelihood(outputs, j, token_id_for, batch_encoder_input)
-                            log_pseudo_likelihood_gene_rev = get_pseudolikelihood(outputs, j, token_id_rev, batch_encoder_input)
+                        log_pseudo_likelihood_gene_for = 0
+                        
+                        for token_idx, token in enumerate(for_token_query_tensor):
+                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j, j + token_idx, token.item())
+                        
+                        # reverse direction
+                        masked_encoder_input = batch_encoder_input.clone()
+                        #masked_encoder_input = 
+                        #print("masked_encoder_input rev", file=sys.stderr)
+                        insert_tensor(masked_encoder_input, rev_token_query_tensor, j)
+                        masked_batch_decoder_input = batch_decoder_input.clone()
+                        #masked_batch_decoder_input = 
+                        #print("masked_batch_decoder_input rev", file=sys.stderr)
+                        insert_tensor(masked_batch_decoder_input, rev_token_query_tensor, j + 1)
+                        masked_encoder_input[0, j:j + addition_length] = mask_token
+                        masked_batch_decoder_input[0, j + 1:(j + 1) + addition_length] = mask_token
+                        masked_encoder_input = masked_encoder_input.to(device)
+                        masked_batch_decoder_input = masked_batch_decoder_input.to(device)
 
-                            # take average of forward and reverse
-                            log_pseudo_likelihood_gene = (log_pseudo_likelihood_gene_for + log_pseudo_likelihood_gene_rev) / 2
+                        outputs = model(input_ids=masked_encoder_input, attention_mask=masked_batch_encoder_attention_mask, decoder_input_ids=masked_batch_decoder_input, decoder_attention_mask=masked_batch_decoder_attention_mask, global_attention_mask=masked_batch_global_attention_mask).logits  # Generate predictions
+
+                        log_pseudo_likelihood_gene_rev = 0
+                        
+                        for token_idx, token in enumerate(rev_token_query_tensor):
+                            log_pseudo_likelihood_gene_rev += get_pseudolikelihood(outputs, j, j + token_idx, token.item())
+                        
+                        # take average of forward and reverse
+                        log_pseudo_likelihood_gene = (log_pseudo_likelihood_gene_for + log_pseudo_likelihood_gene_rev) / 2
                             
-                            genome_gene_dict[gene_id].append(log_pseudo_likelihood_gene)
-
+                        genome_gene_dict[gene_id].append(log_pseudo_likelihood_gene)
+                            
                         # Free GPU memory
                         del masked_encoder_input
+                        del masked_batch_decoder_input
                     
                     # Free GPU memory
                     del batch_encoder_input
@@ -211,6 +322,9 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     del batch_decoder_input
                     del batch_decoder_attention_mask
                     del batch_global_attention_mask
+                    del masked_batch_decoder_attention_mask
+                    del masked_batch_global_attention_mask
+                    del masked_batch_encoder_attention_mask
 
             # calculate whole genome gene likelihoods
             total_gene_list.append(genome_gene_dict)
@@ -219,7 +333,6 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                 average_likelihood_gene = mean(genome_gene_dict[gene_id])
                 average_gene_dict[gene_id].append(average_likelihood_gene)
          
-
     return total_gene_list, average_gene_dict
 
 def read_prompt_file(file_path):
@@ -344,10 +457,10 @@ def main():
         prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
 
     with open(args.reps_dict, 'rb') as handle:
-        tokens_dict = pickle.load(handle)
+        token_to_rep, reps_dict = pickle.load(handle)
         # invert reps_dict
-        reps_dict = dict((v, k) for k, v in tokens_dict.items())
-        del tokens_dict
+        #reps_dict = dict((v, k) for k, v in reps_dict.items())
+        #del reps_dict
 
     # generate tokenized list of genes
     token_query_list = []
