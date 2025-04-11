@@ -10,7 +10,6 @@ import torch.distributed as dist
 #from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.multiprocessing as mp
 import psutil
 import gc
@@ -26,6 +25,7 @@ from pathlib import Path
 import random
 import re
 import deepspeed
+import sys
 
 # Global variables
 PROGRAM_NAME = "panBART"
@@ -105,10 +105,6 @@ def parse_args():
     parser.add_argument("--max_seq_length", type=int, default=16384, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training and validation. This is per GPU.")
     parser.add_argument("--model_dropout_rate", type=float, default=0.2, help="Dropout rate for the model")
-    parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate")
-    parser.add_argument("--lr_scheduler_factor", type=float, default=0.5, help="Factor by which the learning rate will be reduced by the learning rate scheduler")
-    parser.add_argument("--lr_patience", type=int, default=10, help="Patience for learning rate reduction")
-    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for the optimizer")
     parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--min_delta", type=float, default=0.01, help="Minimum delta for early stopping")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
@@ -126,11 +122,12 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=1, help="Number of threads for data loading. Default = 1")
     parser.add_argument("--prop_masked", type=float, default=0.3, help="Average proportion of inputs to be masked. Default = 0.3")
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
-    parser.add_argument("--reuse_tokenizer", default=False, action="store_true", help="Reuse existing tokenizer if present.")
+    parser.add_argument("--generate_tokenizer", default=False, action="store_true", help="Generate existing tokenizer. Should be run without deepspeed first to generate initial tokenizer.")
     parser.add_argument("--gradient_checkpointing", default=False, action="store_true", help="Use gradient checkpointing during training. Improves memory efficiency at cost to runtime.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
     parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
+    parser.add_argument("--deepspeed_config", type=str, required=True, help="Path to deepspeed config file.")
     
     args = parser.parse_args()
 
@@ -214,7 +211,7 @@ def load_dataset(input_file):
         print(f"An error occurred while reading the file: {e}")
         exit(1)
 
-def save_checkpoint(model_engine, epoch, loss, save_dir, lr_scheduler=None):
+def save_checkpoint(model_engine, epoch, loss, save_dir):
     """
     Save the DeepSpeed model engine's checkpoint (model, optimizer, lr scheduler, etc).
     """
@@ -225,17 +222,13 @@ def save_checkpoint(model_engine, epoch, loss, save_dir, lr_scheduler=None):
             "loss": loss,
         }
 
-        # If you have a learning rate scheduler, save its state
-        if lr_scheduler:
-            client_state["lr_scheduler_state"] = lr_scheduler.state_dict()
-
         model_engine.save_checkpoint(save_dir, client_state=client_state)
         if model_engine.global_rank == 0:
             print(f"Saved DeepSpeed checkpoint at {save_dir}/global_step{epoch}")
     except Exception as e:
         print(f"Failed to save checkpoint: {e}")
 
-def load_checkpoint(model_engine, load_dir,restart=False, lr_scheduler=None):
+def load_checkpoint(model_engine, load_dir,restart=False):
     """
     Load a DeepSpeed model checkpoint from directory, including the learning rate scheduler.
     """
@@ -252,11 +245,6 @@ def load_checkpoint(model_engine, load_dir,restart=False, lr_scheduler=None):
         # You can pass epoch and loss through client_state
         start_epoch = client_state.get("epoch", 0) + 1
         print(f"Loaded checkpoint from {load_dir}, resuming at epoch {start_epoch}")
-        
-        # If a lr_scheduler was saved, restore it
-        if lr_scheduler and "lr_scheduler_state" in client_state:
-            lr_scheduler.load_state_dict(client_state["lr_scheduler_state"])
-            print(f"Loaded learning rate scheduler state.")
 
         return start_epoch, True
 
@@ -599,10 +587,6 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     attention_window=args.attention_window
     max_seq_length = args.max_seq_length
     batch_size = args.batch_size
-    learning_rate = args.learning_rate
-    lr_scheduler_factor = args.lr_scheduler_factor
-    weight_decay = args.weight_decay
-    lr_patience = args.lr_patience
     epochs = args.epochs
     model_save_path = args.model_save_path
     log_dir = args.log_dir
@@ -617,16 +601,18 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     model_init.gradient_checkpointing_enable()
 
     # print model params
-    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    pytorch_total_params = sum(p.numel() for p in model_init.parameters() if p.requires_grad)
     logging.info(f"Total model parameters: {pytorch_total_params}")
-    
-    device = rank
-    logging.info(f"device = {device}")
-    
+
+    # initialize model
     model, optimizer, _, _ = deepspeed.initialize(
         model=model_init,
-        optimizer=optimizer,
-        config="deepspeed_config.json")
+        #optimizer=optimizer,
+        config=args.deepspeed_config)
+
+    device = rank
+    logging.info(f"device = {device}")
+    rank = model.local_rank
     
     #model = DDP(model, device_ids=[rank], find_unused_parameters=True)
     train_sampler = DistributedSampler(train_genomes, num_replicas=world_size, rank=rank, shuffle=True)
@@ -643,18 +629,14 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     train_dataset_size = len(train_loader.dataset)
 
     # validation dataset
-    
     val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, global_contig_breaks)
     val_dataset.attention_window = attention_window
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=val_sampler)
     val_dataset_size = len(val_loader.dataset)
 
     criterion = torch.nn.CrossEntropyLoss().to(device) # what are we trying to optimize?
-    # scale lr by number of GPUs used https://github.com/Lightning-AI/pytorch-lightning/discussions/3706#discussioncomment-3960433
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate * math.sqrt(world_size), weight_decay=weight_decay) # How are we trying to optimizer it?
-    lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
 
-    start_epoch, is_checkpoint_loaded = load_checkpoint(model, model_save_path, restart, lr_scheduler)
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, model_save_path, restart)
 
     if rank == 0:
         if is_checkpoint_loaded:
@@ -677,10 +659,9 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         
         # Log training metrics
         if model.local_rank == 0:  # Only rank 0 should write logs
-            logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
+            logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}')
             writer.add_scalar("Loss/train", avg_train_loss, epoch)
             writer.add_scalar("Perplexity/train", train_perplexity, epoch)
-            writer.add_scalar("Learning_rate/train", optimizer.param_groups[0]["lr"], epoch)
 
         # Validate model loop
         #val_loader.sampler.set_epoch(epoch)
@@ -707,9 +688,6 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         val_f1 = val_f1_tensor.item() / world_size
         val_kappa = val_kappa_tensor.item() / world_size
 
-        # step lr_scheduler, will be synchronised as same value computed across GPUs
-        lr_scheduler.step(avg_val_loss)
-
         # Log validation metrics
         if model.local_rank == 0:  # Only rank 0 should write logs
             logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
@@ -719,7 +697,6 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             writer.add_scalar("Recall/val", val_recall, epoch)
             writer.add_scalar("F1/val", val_f1, epoch)
             writer.add_scalar("Kappa/val", val_kappa, epoch)
-            writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
 
             early_stopping(avg_val_loss)
 
@@ -727,11 +704,11 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             
             if avg_val_loss <= early_stopping.best_loss:
                 print("Saving model checkpoint.", flush=True)
-                save_checkpoint(model_engine, epoch, avg_train_loss, model_save_path, lr_scheduler)
+                save_checkpoint(model_engine, epoch, avg_train_loss, model_save_path)
 
             gc.collect()
             writer.close()
-        elif model.local_rank != 0):
+        elif model.local_rank != 0:
             early_stop_tensor = torch.tensor(0).to(rank)
 
         # broadcast to all GPUs, check if early stop triggered
@@ -893,12 +870,14 @@ def main():
         f"Sequence lengths - Min: {min_sequence_length}, Max: {max_sequence_length}, Avg: {avg_sequence_length:.2f}"
     )
 
-    if not args.reuse_tokenizer:
+    # generate tokenizer
+    if args.generate_tokenizer:
         tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
         tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
         trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
         tokenizer.train_from_iterator(genomes + reversed_genomes, trainer)
         tokenizer.save(tokenizer_path)
+        sys.exit(0)
 
     tokenizer = Tokenizer.from_file(tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
