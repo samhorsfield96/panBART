@@ -123,13 +123,17 @@ def get_pseudolikelihood(outputs, i, j, token_id):
     log_pseudo_likelihood = 0
     for pos in range(i, j):
         logits = outputs[0, pos]
-
+        #print(token_id, file=sys.stderr)
+        #print(logits, file=sys.stderr)
         # Get the probability of the original token
         token_prob = torch.softmax(logits, dim=-1)[token_id].item()
+        #print(token_prob, file=sys.stderr)
+        #print(torch.log(torch.tensor(token_prob)).to("cpu").item(), file=sys.stderr)
 
         # Add the log probability to the total log-pseudo-likelihood
         log_pseudo_likelihood += torch.log(torch.tensor(token_prob)).to("cpu").item()
     
+    #print(log_pseudo_likelihood, file=sys.stderr)
     return log_pseudo_likelihood
 
 def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, token_query_list):
@@ -199,7 +203,7 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                         log_pseudo_likelihood_gene_for = 0
                         
                         for token_idx, token in enumerate(for_token_query_tensor):
-                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j + token_idx, token.item(), batch_encoder_input)
+                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j, j + token_idx + 1, token.item())
                         
                         # reverse direction
                         masked_encoder_input = batch_encoder_input.clone()
@@ -213,7 +217,7 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                         log_pseudo_likelihood_gene_rev = 0
                         
                         for token_idx, token in enumerate(rev_token_query_tensor):
-                            log_pseudo_likelihood_gene_rev += get_pseudolikelihood(outputs, j + token_idx, token.item(), batch_encoder_input)
+                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j, j + token_idx + 1, token.item())
                         
                         # take average of forward and reverse
                         log_pseudo_likelihood_gene = (log_pseudo_likelihood_gene_for + log_pseudo_likelihood_gene_rev) / 2
@@ -284,7 +288,7 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                         log_pseudo_likelihood_gene_for = 0
                         
                         for token_idx, token in enumerate(for_token_query_tensor):
-                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j, j + token_idx, token.item())
+                            log_pseudo_likelihood_gene_for += get_pseudolikelihood(outputs, j, j + token_idx + 1, token.item())
                         
                         # reverse direction
                         masked_encoder_input = batch_encoder_input.clone()
@@ -305,11 +309,12 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                         log_pseudo_likelihood_gene_rev = 0
                         
                         for token_idx, token in enumerate(rev_token_query_tensor):
-                            log_pseudo_likelihood_gene_rev += get_pseudolikelihood(outputs, j, j + token_idx, token.item())
+                            log_pseudo_likelihood_gene_rev += get_pseudolikelihood(outputs, j, j + token_idx + 1, token.item())
                         
                         # take average of forward and reverse
                         log_pseudo_likelihood_gene = (log_pseudo_likelihood_gene_for + log_pseudo_likelihood_gene_rev) / 2
-                            
+                        #print(f"log_pseudo_likelihood_gene: {log_pseudo_likelihood_gene}", file=sys.stderr)    
+                        
                         genome_gene_dict[gene_id].append(log_pseudo_likelihood_gene)
                             
                         # Free GPU memory
