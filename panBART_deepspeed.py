@@ -211,7 +211,7 @@ def load_dataset(input_file):
         print(f"An error occurred while reading the file: {e}")
         exit(1)
 
-def save_checkpoint(model_engine, epoch, loss, save_dir):
+def save_checkpoint(model, epoch, loss, save_dir):
     """
     Save the DeepSpeed model engine's checkpoint (model, optimizer, lr scheduler, etc).
     """
@@ -222,13 +222,13 @@ def save_checkpoint(model_engine, epoch, loss, save_dir):
             "loss": loss,
         }
 
-        model_engine.save_checkpoint(save_dir, client_state=client_state)
-        if model_engine.global_rank == 0:
+        model.save_checkpoint(save_dir, client_state=client_state)
+        if model.global_rank == 0:
             print(f"Saved DeepSpeed checkpoint at {save_dir}/global_step{epoch}")
     except Exception as e:
         print(f"Failed to save checkpoint: {e}")
 
-def load_checkpoint(model_engine, load_dir,restart=False):
+def load_checkpoint(model, load_dir,restart=False):
     """
     Load a DeepSpeed model checkpoint from directory, including the learning rate scheduler.
     """
@@ -237,7 +237,7 @@ def load_checkpoint(model_engine, load_dir,restart=False):
         return 0, False
 
     try:
-        success, client_state = model_engine.load_checkpoint(load_dir)
+        success, client_state = model.load_checkpoint(load_dir)
         if not success:
             print("Failed to load checkpoint. Starting from scratch.")
             return 0, False
@@ -293,12 +293,12 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, e
 
         #torch.cuda.empty_cache()
         
-        #labels = labels.to(device)
+        labels = labels.to(device)
         
-        loss = outputs.loss #criterion(outputs.view(-1, vocab_size), labels.view(-1))
+        loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
 
-        model_engine.backward(loss)
-        model_engine.step()
+        model.backward(loss)
+        model.step()
 
         total_train_loss += total_loss(loss) #loss.item() * labels.size(0)  # Accumulate the loss
         
@@ -354,7 +354,7 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
 
             labels = labels.to(device)
             
-            loss = outputs.loss # loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
+            loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
             total_val_loss += total_loss(loss)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
@@ -648,8 +648,8 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     for epoch in range(start_epoch, epochs):
         # Training model loop
         #train_loader.sampler.set_epoch(epoch)
-        train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
-        total_train_loss = train_model(train_loader, model_engine, optimizer, criterion, device, vocab_size, args.encoder_only, epoch)
+        train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training (rank {model.local_rank})", unit="batch")
+        total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, args.encoder_only, epoch)
 
         total_train_loss_tensor = torch.tensor(total_train_loss).to(rank)
 
@@ -665,8 +665,8 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
 
         # Validate model loop
         #val_loader.sampler.set_epoch(epoch)
-        val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
-        total_val_loss, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model_engine, criterion, device, vocab_size, args.encoder_only, epoch)
+        val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation (rank {model.local_rank})", unit="batch")
+        total_val_loss, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
         
         total_val_loss_tensor = torch.tensor(total_val_loss).to(rank)
         val_precision_tensor = torch.tensor(val_precision).to(rank)
@@ -698,18 +698,16 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             writer.add_scalar("F1/val", val_f1, epoch)
             writer.add_scalar("Kappa/val", val_kappa, epoch)
 
-            early_stopping(avg_val_loss)
-
-            early_stop_tensor = torch.tensor(int(early_stopping.early_stop)).to(rank)
-            
-            if avg_val_loss <= early_stopping.best_loss:
-                print("Saving model checkpoint.", flush=True)
-                save_checkpoint(model_engine, epoch, avg_train_loss, model_save_path)
-
             gc.collect()
             writer.close()
-        elif model.local_rank != 0:
-            early_stop_tensor = torch.tensor(0).to(rank)
+        # elif model.local_rank != 0:
+        #     early_stop_tensor = torch.tensor(0).to(rank)
+
+        early_stopping(avg_val_loss)
+        early_stop_tensor = torch.tensor(int(early_stopping.early_stop)).to(rank)
+        if avg_val_loss <= early_stopping.best_loss:
+            print("Saving model checkpoint.", flush=True)
+            save_checkpoint(model, epoch, avg_train_loss, model_save_path)
 
         # broadcast to all GPUs, check if early stop triggered
         dist.broadcast(early_stop_tensor, src=0)
@@ -723,7 +721,7 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=test_sampler)
         #test_loader.sampler.set_epoch(epoch)
         test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
-        test_loader = tqdm(test_loader, desc="Testing", unit="batch")
+        test_loader = tqdm(test_loader, desc=f"Testing  rank {model.local_rank})", unit="batch")
         # Test Model Loop
         total_test_loss, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, args.encoder_only)
         
