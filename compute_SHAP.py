@@ -130,6 +130,7 @@ def parse_args():
     parser.add_argument("--seed", default=42, type=int, help="Seed for randomisation")
     parser.add_argument("--randomise", action="store_true", default=False, help="Randomise input tokens.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
+    parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
 
     args = parser.parse_args()
 
@@ -284,7 +285,7 @@ def read_prompt_file(file_path):
 
 def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, target_token):
     if DDP_active:
-        setup(rank, world_size)
+        setup(rank, world_size, args.port)
         #prompt_list = prompt_list[rank]
         sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
         num_workers = 0
