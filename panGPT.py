@@ -43,7 +43,7 @@ logging.basicConfig(
 # DDP setup
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '12356'
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -456,7 +456,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True, ID_list=None):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
@@ -467,6 +467,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         self.eos_token = self.tokenizer.encode("</s>").ids[0]
         self.global_contig_breaks = global_contig_breaks
         self.shuffle = shuffle
+        self.ID_list = ID_list
 
     def __len__(self):
         return len(self.texts)
@@ -588,7 +589,10 @@ class GenomeDataset(torch.utils.data.Dataset):
         # print(len(global_attention_mask.tolist()))
         # print(global_attention_mask.tolist())
 
-        return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
+        if self.ID_list == None:
+            return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
+        else:
+            return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask, self.ID_list[idx]
 
 class EarlyStopping:
     """
