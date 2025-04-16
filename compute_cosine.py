@@ -229,7 +229,7 @@ def split_prompts(prompts, world_size):
 
 def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only):
     if DDP_active:
-        setup(rank, world_size)
+        setup(rank, world_size, args.port)
         #prompt_list = prompt_list[rank]
         sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
         num_workers = 0

@@ -41,9 +41,9 @@ logging.basicConfig(
 )
 
 # DDP setup
-def setup(rank, world_size):
+def setup(rank, world_size, port):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12356'
+    os.environ['MASTER_PORT'] = port
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -134,6 +134,7 @@ def parse_args():
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
     parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
+    parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
     
     args = parser.parse_args()
 
@@ -633,7 +634,7 @@ class EarlyStopping:
 
 def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size, DDP_active=False):
     if DDP_active:
-        setup(rank, world_size)
+        setup(rank, world_size, args.port)
 
     attention_window=args.attention_window
     max_seq_length = args.max_seq_length
