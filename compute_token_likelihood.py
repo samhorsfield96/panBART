@@ -20,6 +20,7 @@ from collections import defaultdict
 import pickle
 import sys
 from statistics import mean
+from compute_SHAP import 
 
 logging.set_verbosity_error()
 
@@ -35,6 +36,9 @@ def insert_tensor(tensor, value_tensor, insert_pos):
     #print(tensor[0, insert_pos], file=sys.stderr)
     #print(tensor, file=sys.stderr)
     #return tensor
+
+def insert_list(lst, i, new_elements):
+    return lst[:i] + new_elements + lst[i:]
 
 def generate_gene_id(unsplit_id):
     name = unsplit_id.split("SAM")[1].split("_")[0].split(".")[0]
@@ -75,7 +79,9 @@ def parse_args():
     parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
     parser.add_argument("--parse_gene_id", default=False, action="store_true", help="Augment gene IDs to old format. Default = False.")
+    parser.add_argument("--max-SHAP", default=False, action="store_true", help="Calculate SHAP values for position with highest pseudolikelihood")
     parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
+    parser.add_argument("--seed", default=42, type=int, help="Seed for randomisation")
 
     args = parser.parse_args()
 
@@ -137,7 +143,7 @@ def get_pseudolikelihood(outputs, i, j, token_id):
     #print(log_pseudo_likelihood, file=sys.stderr)
     return log_pseudo_likelihood
 
-def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, token_query_list):
+def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, token_query_list, max_SHAP, args):
     model.eval()
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
@@ -187,7 +193,7 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     masked_batch_global_attention_mask.to(device)
 
                     for j in range(0, token_count):
-                        print(f"token: {j}", file=sys.stderr)
+                        #print(f"token: {j}", file=sys.stderr)
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
@@ -265,7 +271,7 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     masked_batch_decoder_attention_mask.to(device)
 
                     for j in range(0, token_count):
-                        print(f"token: {j}", file=sys.stderr)
+                        #print(f"token: {j}", file=sys.stderr)
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
@@ -331,14 +337,43 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     del masked_batch_decoder_attention_mask
                     del masked_batch_global_attention_mask
                     del masked_batch_encoder_attention_mask
-
+            
             # calculate whole genome gene likelihoods
             total_gene_list.append(genome_gene_dict)
             
             for gene_id, token_id_for, token_id_rev in token_query_list:
                 average_likelihood_gene = mean(genome_gene_dict[gene_id])
                 average_gene_dict[gene_id].append(average_likelihood_gene)
-         
+
+            # get SHAP values for highest SHAP position, only works for single loci currently
+            if max_SHAP:
+                prompt_list = []
+                for genome_idx in range(0, len(loader)):
+                    genome = loader.getitem(genome_idx)
+                    
+                    # get position of highest pseuodolikelihood value
+                    for gene_id, genome_gene_list in genome_gene_dict:
+                        max_value = max(genome_gene_list)
+                        max_idx = None
+                        for idx, value in enumerate(genome_gene_list):
+                            if value == m:
+                                max_idx = idx
+                                break
+                    
+                    # insert into specific location
+                    split_genome = genome.split(" ")
+
+                    for_token_query_list = [token_id_for for gene_id, token_id_for, token_id_rev in token_query_list]
+                    rev_token_query_list = [token_id_rev for gene_id, token_id_for, token_id_rev in token_query_list]
+                    
+                    for_split_genome = insert_list(split_genome, max_idx, for_token_query_list)
+                    rev_split_genome = insert_list(split_genome, max_idx, rev_token_query_list)
+                    prompt_list.append(for_split_genome)
+                    prompt_list.append(rev_split_genome)
+
+                target_token = token_query_list[0][0]
+                calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, args.outpref, args.seed, args)
+
     return total_gene_list, average_gene_dict
 
 def read_prompt_file(file_path):
@@ -390,7 +425,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    total_gene_list, average_gene_dict = calculate_gene_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, token_query_list)
+    total_gene_list, average_gene_dict = calculate_gene_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, token_query_list, args.max_SHAP, prompt_list)
     
     return_list.extend(total_gene_list)
     gene_list.append(average_gene_dict)

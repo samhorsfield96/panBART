@@ -204,7 +204,7 @@ def load_dataset(input_file):
     try:
         with open(input_file, "r") as file:
             genomes = [genome.strip() for genome in file.readlines()]
-            # randomise conitg order
+            # randomise contig order
             #for index in range(len(genomes)):
             #    split_genome = genomes[index].split(" _ ")
             #    random.shuffle(split_genome)
@@ -472,6 +472,12 @@ class GenomeDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.texts)
+
+    def getitem(self, idx):
+        text = self.texts[idx]
+        split_genome = text.strip().split("_")
+        genome = "_ " + " _ ".join(split_genome) + " _"
+        return genome
 
     def __getitem__(self, idx):
         text = self.texts[idx]

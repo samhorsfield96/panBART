@@ -20,6 +20,7 @@ import shap
 import scipy as sp
 from panPrompt import mask_integers
 import pandas as pd
+from panGPT import GenomeDataset
 
 logging.set_verbosity_error()
 
@@ -168,7 +169,7 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, e
     model.eval()
     for _x in x:
         #print(_x)
-        encoder_input, decoder_input, decoder_attention_mask, encoder_attention_mask, global_attention_mask = tokenise_input(_x, tokenizer, max_seq_length, pad_token, mask_token)
+        decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask = _x
         #print(encoder_input)
         #print(pos)
         if encoder_only:
@@ -211,7 +212,7 @@ def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
     #print(out["offset_mapping"])
     return out
 
-def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed):
+def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed, args):
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
@@ -230,7 +231,7 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
     # create partial tokenizer
     tokenizer_partial = partial(custom_tokenizer, tokenizer=tokenizer)
     # issue might be how masker is working, if it truncates sequences rather than just masking positions.
-    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask> ", collapse_mask_token=False)
+    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask>", collapse_mask_token=False)
 
     shap_values_list = []
     for idx, element in enumerate(prompt_list):
@@ -248,11 +249,16 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 # set max_evals to be same as permutations required for position to be masked and unmasked
                 explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1, seed=seed)
 
-                # change indices to masks one at a time to ensure token doesn't imapct on itself
+                # change indices to masks one at a time to ensure token doesn't impact on itself
                 split_element[pos] = "<mask>"
                 new_element = " ".join(split_element)
 
-                shap_values = explainer([new_element])
+                dataset = GenomeDataset([new_element], tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
+                dataset.attention_window = args.attention_window
+                loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
+
+                for tensor_set in loader:
+                    shap_values = explainer([tensor_set])
 
                 # shap_values has three class objects:
                 # .values: of shape (1, N_positions, N_token_ids)
@@ -316,7 +322,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref, args.seed)
+    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref, args.seed, args)
 
         
 def main():
