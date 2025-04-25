@@ -20,7 +20,7 @@ from collections import defaultdict
 import pickle
 import sys
 from statistics import mean
-from compute_SHAP import 
+from compute_SHAP import calculate_SHAP
 
 logging.set_verbosity_error()
 
@@ -148,12 +148,12 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
 
-    for_token_query_tensor = torch.tensor([token_id_for for gene_id, token_id_for, token_id_rev in token_query_list]).reshape(len(token_query_list),1).to(device)
-    rev_token_query_tensor = torch.tensor([token_id_rev for gene_id, token_id_for, token_id_rev in token_query_list]).reshape(len(token_query_list),1).to(device)
+    for_token_query_tensor = torch.tensor([token_id_for for gene_id, token_id_for, token_id_rev, gene_token in token_query_list]).reshape(len(token_query_list),1).to(device)
+    rev_token_query_tensor = torch.tensor([token_id_rev for gene_id, token_id_for, token_id_rev, gene_token in token_query_list]).reshape(len(token_query_list),1).to(device)
     attention_mask_tensor = torch.ones(len(token_query_list), dtype=torch.long).reshape(len(token_query_list),1).to(device)
     global_attention_mask_tensor = torch.zeros(len(token_query_list), dtype=torch.long).reshape(len(token_query_list),1).to(device)
     addition_length = len(token_query_list)
-    gene_id = "_".join([gene_id for gene_id, token_id_for, token_id_rev in token_query_list])
+    gene_id = "_".join([gene_id for gene_id, token_id_for, token_id_rev, gene_token in token_query_list])
 
     total_gene_list = []
     average_gene_dict = defaultdict(list)
@@ -341,13 +341,15 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
             # calculate whole genome gene likelihoods
             total_gene_list.append(genome_gene_dict)
             
-            for gene_id, token_id_for, token_id_rev in token_query_list:
+            for gene_id, token_id_for, token_id_rev, gene_token in token_query_list:
                 average_likelihood_gene = mean(genome_gene_dict[gene_id])
                 average_gene_dict[gene_id].append(average_likelihood_gene)
 
             # get SHAP values for highest SHAP position, only works for single loci currently
             if max_SHAP:
-                prompt_list = []
+                print("Calculating SHAP values")
+                prompt_list_for = []
+                prompt_list_rev = []
                 for genome_idx in range(0, len(loader)):
                     genome = loader.getitem(genome_idx)
                     
@@ -363,16 +365,18 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     # insert into specific location
                     split_genome = genome.split(" ")
 
-                    for_token_query_list = [token_id_for for gene_id, token_id_for, token_id_rev in token_query_list]
-                    rev_token_query_list = [token_id_rev for gene_id, token_id_for, token_id_rev in token_query_list]
+                    for_token_query_list = [gene_token for gene_id, token_id_for, token_id_rev, gene_token in token_query_list]
+                    rev_token_query_list = [-1 * gene_token for gene_id, token_id_for, token_id_rev, gene_token in token_query_list]
                     
                     for_split_genome = insert_list(split_genome, max_idx, for_token_query_list)
                     rev_split_genome = insert_list(split_genome, max_idx, rev_token_query_list)
-                    prompt_list.append(for_split_genome)
-                    prompt_list.append(rev_split_genome)
+                    prompt_list_for.append(for_split_genome)
+                    prompt_list_rev.append(rev_split_genome)
 
-                target_token = token_query_list[0][0]
-                calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, args.outpref, args.seed, args)
+                for_target_token = token_query_list[0][3]
+                rev_target_token = -1 * token_query_list[0][3]
+                calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, for_target_token, args.outpref + "_for", args.seed, args)
+                calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, rev_target_token, args.outpref + "_rev", args.seed, args)
 
     return total_gene_list, average_gene_dict
 
@@ -521,7 +525,7 @@ def main():
                 if decoded_token_tuple[0] == "<unk>" and decoded_token_tuple[1] == "<unk>":
                     print(f"{split_line_ori} not in tokenizer")
                 else:
-                    token_query_list.append((split_line_ori, token_tuple[0], token_tuple[1]))
+                    token_query_list.append((split_line_ori, token_tuple[0], token_tuple[1], gene_token))
             except KeyError:
                 print(f"{split_line_ori} not in reps_dict")
     
@@ -531,7 +535,7 @@ def main():
 
     with open(args.outpref + "_genes_to_tokens.txt", "w") as f:
         f.write("Gene_ID\tToken_for\tToken_rev\n")
-        for gene_id, token_for, token_rev in token_query_list:
+        for gene_id, token_for, token_rev, gene_token in token_query_list:
             f.write(f"{gene_id}\t{str(token_for)}\t{str(token_rev)}\n")
 
     return_list = []
