@@ -164,13 +164,18 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
 
 
 # this defines an explicit python function that takes a list of strings and outputs scores for each class
-def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, encoder_only=False):
+def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, args, encoder_only=False):
     outputs = []
     model.eval()
-    for _x in x:
+
+    #print(f"x: {x}")
+    dataset = GenomeDataset(x, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
+    dataset.attention_window = args.attention_window
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
+    for _x in loader:
         #print(_x)
         decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask = _x
-        #print(encoder_input)
+        #print(f"encoder_input: {encoder_input}")
         #print(pos)
         if encoder_only:
             batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
@@ -243,8 +248,15 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
 
             # increment through each position is found in
             for pos in positions:
-                # create partial function, need to add pos+1 as output is one token shuffled from input
-                f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=pos + 1, encoder_only=encoder_only)
+                # need to add pos+1 as output is one token shuffled from input
+                # if encoder_only == False:
+                #     target_pos = pos + 1
+                # else:
+                #     target_pos = pos
+                target_pos = pos
+                
+                # create partial function
+                f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=target_pos, args=args, encoder_only=encoder_only)
                 
                 # set max_evals to be same as permutations required for position to be masked and unmasked
                 explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1, seed=seed)
@@ -253,12 +265,16 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 split_element[pos] = "<mask>"
                 new_element = " ".join(split_element)
 
-                dataset = GenomeDataset([new_element], tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
-                dataset.attention_window = args.attention_window
-                loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
+                #print(f"new_element: {new_element}")
 
-                for tensor_set in loader:
-                    shap_values = explainer([tensor_set])
+                # dataset = GenomeDataset([new_element], tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
+                # dataset.attention_window = args.attention_window
+                # loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
+
+                # for tensor_set in loader:
+                #     shap_values = explainer([tensor_set])
+
+                shap_values = explainer([new_element])
 
                 # shap_values has three class objects:
                 # .values: of shape (1, N_positions, N_token_ids)
