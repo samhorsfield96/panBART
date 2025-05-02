@@ -143,7 +143,7 @@ def get_pseudolikelihood(outputs, i, j, token_id):
     #print(log_pseudo_likelihood, file=sys.stderr)
     return log_pseudo_likelihood
 
-def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, token_query_list, max_SHAP, args):
+def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, token_query_list, max_SHAP, args, dataset):
     model.eval()
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
@@ -351,14 +351,14 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                 prompt_list_for = []
                 prompt_list_rev = []
                 for genome_idx in range(0, len(loader)):
-                    genome = loader.getitem(genome_idx)
+                    genome = dataset.getitem(genome_idx)
                     
                     # get position of highest pseuodolikelihood value
-                    for gene_id, genome_gene_list in genome_gene_dict:
+                    for gene_id, genome_gene_list in genome_gene_dict.items():
                         max_value = max(genome_gene_list)
                         max_idx = None
                         for idx, value in enumerate(genome_gene_list):
-                            if value == m:
+                            if value == max_value:
                                 max_idx = idx
                                 break
                     
@@ -368,15 +368,15 @@ def calculate_gene_pseudolikelihood(model, tokenizer, loader, device, max_seq_le
                     for_token_query_list = [gene_token for gene_id, token_id_for, token_id_rev, gene_token in token_query_list]
                     rev_token_query_list = [-1 * gene_token for gene_id, token_id_for, token_id_rev, gene_token in token_query_list]
                     
-                    for_split_genome = insert_list(split_genome, max_idx, for_token_query_list)
-                    rev_split_genome = insert_list(split_genome, max_idx, rev_token_query_list)
+                    for_split_genome = " ".join([str(x) for x in insert_list(split_genome, max_idx, for_token_query_list)])
+                    rev_split_genome = " ".join([str(x) for x in insert_list(split_genome, max_idx, rev_token_query_list)])
                     prompt_list_for.append(for_split_genome)
                     prompt_list_rev.append(rev_split_genome)
 
                 for_target_token = token_query_list[0][3]
                 rev_target_token = -1 * token_query_list[0][3]
-                calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, for_target_token, args.outpref + "_for", args.seed, args)
-                calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, rev_target_token, args.outpref + "_rev", args.seed, args)
+                calculate_SHAP(model, tokenizer, prompt_list_for, device, max_seq_length, encoder_only, str(for_target_token), args.outpref + "_for", args.seed, args)
+                calculate_SHAP(model, tokenizer, prompt_list_rev, device, max_seq_length, encoder_only, str(rev_target_token), args.outpref + "_rev", args.seed, args)
 
     return total_gene_list, average_gene_dict
 
@@ -429,7 +429,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    total_gene_list, average_gene_dict = calculate_gene_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, token_query_list, args.max_SHAP, prompt_list)
+    total_gene_list, average_gene_dict = calculate_gene_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, token_query_list, args.max_SHAP, args, dataset)
     
     return_list.extend(total_gene_list)
     gene_list.append(average_gene_dict)
