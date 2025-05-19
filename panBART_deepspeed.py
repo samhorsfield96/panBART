@@ -7,15 +7,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
+#from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.multiprocessing as mp
 import psutil
 import gc
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import precision_score, recall_score, f1_score, cohen_kappa_score
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 import warnings
 import random
@@ -25,6 +24,7 @@ from transformers import LEDConfig, LEDForConditionalGeneration, LEDTokenizer
 from pathlib import Path
 import random
 import re
+import deepspeed
 import sys
 
 # Global variables
@@ -41,16 +41,11 @@ logging.basicConfig(
     ],
 )
 
-# DDP setup
-def setup(rank, world_size, port):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = port
-
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-def cleanup():
-    dist.destroy_process_group()
+def total_loss(loss_tensor):
+    # Clone to avoid modifying original loss tensor
+    total = loss_tensor.clone()
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return total
 
 def flip_contig(contig):
     return " ".join([str(int(x) * -1) for x in contig.strip().split()][::-1])
@@ -102,6 +97,7 @@ def parse_args():
     parser.add_argument("--train_file", type=str, default=None, help="Path to the training input file")
     parser.add_argument("--val_file", type=str, default=None, help="Path to the validation input file")
     parser.add_argument("--test_file", type=str, default=None, help="Path to the test input file")
+    parser.add_argument("--local_rank", type=int, default=0, help="Device rank.")
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads")
@@ -109,10 +105,6 @@ def parse_args():
     parser.add_argument("--max_seq_length", type=int, default=16384, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training and validation. This is per GPU.")
     parser.add_argument("--model_dropout_rate", type=float, default=0.2, help="Dropout rate for the model")
-    parser.add_argument("--learning_rate", type=float, default=0.0001, help="Learning rate")
-    parser.add_argument("--lr_scheduler_factor", type=float, default=0.5, help="Factor by which the learning rate will be reduced by the learning rate scheduler")
-    parser.add_argument("--lr_patience", type=int, default=10, help="Patience for learning rate reduction")
-    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for the optimizer")
     parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--min_delta", type=float, default=0.01, help="Minimum delta for early stopping")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
@@ -130,12 +122,12 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=1, help="Number of threads for data loading. Default = 1")
     parser.add_argument("--prop_masked", type=float, default=0.3, help="Average proportion of inputs to be masked. Default = 0.3")
     parser.add_argument("--restart", default=False, action="store_true", help="Restart model if checkpoint file present.")
-    parser.add_argument("--reuse_tokenizer", default=False, action="store_true", help="Reuse existing tokenizer if present.")
+    parser.add_argument("--generate_tokenizer", default=False, action="store_true", help="Generate existing tokenizer. Should be run without deepspeed first to generate initial tokenizer.")
     parser.add_argument("--gradient_checkpointing", default=False, action="store_true", help="Use gradient checkpointing during training. Improves memory efficiency at cost to runtime.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
     parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
-    parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
+    parser.add_argument("--deepspeed_config", type=str, required=True, help="Path to deepspeed config file.")
     
     args = parser.parse_args()
 
@@ -205,7 +197,7 @@ def load_dataset(input_file):
     try:
         with open(input_file, "r") as file:
             genomes = [genome.strip() for genome in file.readlines()]
-            # randomise contig order
+            # randomise conitg order
             #for index in range(len(genomes)):
             #    split_genome = genomes[index].split(" _ ")
             #    random.shuffle(split_genome)
@@ -219,74 +211,45 @@ def load_dataset(input_file):
         print(f"An error occurred while reading the file: {e}")
         exit(1)
 
-def save_checkpoint(model, optimizer, epoch, loss, lr_scheduler, save_path):
+def save_checkpoint(model, epoch, loss, save_dir):
     """
-    Save the model checkpoint to a file.
-
-    Args:
-    - model: The PyTorch model to save.
-    - optimizer: The optimizer state associated with the model.
-    - epoch (int): The current epoch number.
-    - loss: The loss value at the current epoch.
-    - save_path (str): Path to save the model checkpoint file.
-
-    This function saves the model checkpoint, including the model state dictionary,
-    optimizer state dictionary, current epoch number, and loss value, to the specified file.
+    Save the DeepSpeed model engine's checkpoint (model, optimizer, lr scheduler, etc).
     """
-
     try:
-        checkpoint = {
+        # client_state can hold any custom info you want to save
+        client_state = {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "lr_scheduler" : lr_scheduler,
             "loss": loss,
         }
-        torch.save(checkpoint, save_path)
-    except IOError as e:
-        print(f"Failed to save checkpoint to '{save_path}': {e}")
 
-def load_checkpoint(model, optimizer, lr_scheduler, checkpoint_path, restart, rank, map_location=None):
-    """
-    Load a model checkpoint from a file.
-
-    Args:
-    - model: The PyTorch model to load the checkpoint into.
-    - optimizer: The optimizer associated with the model.
-    - checkpoint_path (str): Path to the model checkpoint file.
-
-    Returns:
-    - tuple: A tuple containing the start epoch number and a boolean indicating
-             whether the checkpoint was successfully loaded.
-
-    This function loads a model checkpoint from the specified file into the given model
-    and optimizer. It returns the start epoch number and a boolean indicating whether
-    the checkpoint was successfully loaded.
-    """
-
-    if not os.path.exists(checkpoint_path):
-        print("No checkpoint found. Starting from scratch.")
-        return 0, False
-    try:
-        if restart:
-            print("Restarting training, overwriting existing checkpoint.")
-            return 0, False
-        if map_location != None:
-            checkpoint = torch.load(checkpoint_path, map_location=map_location)
-        else:
-            checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        lr_scheduler = checkpoint["lr_scheduler"]
-        start_epoch = checkpoint["epoch"] + 1
-        print(f"Checkpoint loaded. Resuming training from epoch {start_epoch}")
-        return start_epoch, True
+        model.save_checkpoint(save_dir, client_state=client_state)
+        if model.global_rank == 0:
+            print(f"Saved DeepSpeed checkpoint at {save_dir}/global_step{epoch}")
     except Exception as e:
-        if "size mismatch" in str(e):
-            error_msg = "Error: Checkpoint and current model do not match in size."
-        else:
-            error_msg = f"Error loading checkpoint from '{checkpoint_path}': {str(e)}"
-        logging.error(error_msg)
+        print(f"Failed to save checkpoint: {e}")
+
+def load_checkpoint(model, load_dir,restart=False):
+    """
+    Load a DeepSpeed model checkpoint from directory, including the learning rate scheduler.
+    """
+    if not os.path.exists(load_dir) or restart:
+        print("No checkpoint found or restarting training. Starting from scratch.")
+        return 0, False
+
+    try:
+        success, client_state = model.load_checkpoint(load_dir)
+        if not success:
+            print("Failed to load checkpoint. Starting from scratch.")
+            return 0, False
+
+        # You can pass epoch and loss through client_state
+        start_epoch = client_state.get("epoch", 0) + 1
+        print(f"Loaded checkpoint from {load_dir}, resuming at epoch {start_epoch}")
+
+        return start_epoch, True
+
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
         return 0, False
 
 def train_model(train_loader, model, optimizer, criterion, device, vocab_size, encoder_only, epoch):
@@ -311,7 +274,7 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, e
     total_train_loss = 0
     for i, (decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask) in enumerate(train_loader):  # Added enumeration for clarity
         
-        optimizer.zero_grad()  # Clear gradients before calculating them
+        #optimizer.zero_grad()  # Clear gradients before calculating them
         if encoder_only:
             encoder_input, encoder_attention_mask, global_attention_mask = encoder_input.to(device), encoder_attention_mask.to(device), global_attention_mask.to(device)  # Move data to the appropriate device
             
@@ -334,13 +297,10 @@ def train_model(train_loader, model, optimizer, criterion, device, vocab_size, e
         
         loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
 
-        total_train_loss += loss.item() * labels.size(0)  # Accumulate the loss
-        
-        del labels
-        #torch.cuda.empty_cache()
+        model.backward(loss)
+        model.step()
 
-        loss.backward()  # Compute gradient of the loss w.r.t. network parameters
-        optimizer.step()  # Update parameters based on gradient
+        total_train_loss += total_loss(loss) #loss.item() * labels.size(0)  # Accumulate the loss
         
         # Update the progress bar
         train_loader.set_description(f"Epoch {epoch} - Training")
@@ -360,17 +320,16 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
     - device (torch.device): Device to perform computations on (CPU or GPU).
 
     Returns:
-    - tuple: Tuple containing validation metrics (average validation loss, accuracy,
-             precision, recall, F1 score).
+    - tuple: Tuple containing validation metrics (average validation loss,
+             precision, recall, F1 score, Cohen's kappa).
 
     This function validates the transformer model on the validation dataset,
-    computes various validation metrics (average validation loss, accuracy, precision,
-    recall, F1 score), and returns them as a tuple.
+    computes various validation metrics (average validation loss, precision,
+    recall, F1 score, Cohen's kappa), and returns them as a tuple.
     """
 
     model.eval()  # Set the model to evaluation mode
     total_val_loss = 0
-    total_accuracy = 0
     preds_all = []
     labels_all = []
     with torch.no_grad():
@@ -396,7 +355,7 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
             labels = labels.to(device)
             
             loss = criterion(outputs.view(-1, vocab_size), labels.view(-1))
-            total_val_loss += loss.item() * labels.size(0)  # Accumulate the loss
+            total_val_loss += total_loss(loss)  # Accumulate the loss
 
             preds = outputs.argmax(dim=-1)  # Get predicted classes
 
@@ -404,11 +363,6 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
             mask = labels != -100
             preds = preds[mask]
             labels = labels[mask]
-
-            # calculate accuracy
-            correct = (preds == labels).sum().item()
-            accuracy = correct / labels.numel()
-            total_accuracy += accuracy * labels.size(0)  # Accumulate the accuracy
 
             # print("loss:")
             # print(loss.item())
@@ -434,17 +388,12 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
 
     # Calculate overall metrics from collected predictions and labels
     #avg_val_loss = total_val_loss / dataset_size
-    #avg_val_accuracy = total_accuracy / dataset_size
-    
-    #print("Completed all validation queries", file=sys.stderr)
     precision = precision_score(labels_all, preds_all, average='macro', zero_division=0)
-    #print("Completed precision calculation", file=sys.stderr)
     recall = recall_score(labels_all, preds_all, average='macro', zero_division=0)
-    #print("Completed recall calculation", file=sys.stderr)
     f1 = f1_score(labels_all, preds_all, average='macro', zero_division=0)
-    #print("Completed f1 calculation", file=sys.stderr)
+    kappa = cohen_kappa_score(labels_all, preds_all)
 
-    return total_val_loss, total_accuracy, precision, recall, f1
+    return total_val_loss, precision, recall, f1, kappa
 
 class GenomeDataset(torch.utils.data.Dataset):
     """
@@ -462,7 +411,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True, ID_list=None):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
@@ -473,17 +422,9 @@ class GenomeDataset(torch.utils.data.Dataset):
         self.eos_token = self.tokenizer.encode("</s>").ids[0]
         self.global_contig_breaks = global_contig_breaks
         self.shuffle = shuffle
-        self.ID_list = ID_list
 
     def __len__(self):
         return len(self.texts)
-
-    def getitem(self, idx):
-        text = self.texts[idx]
-        split_genome = text.strip().split("_")
-        split_genome = [x.strip() for x in split_genome]
-        genome = "_ " + " _ ".join(split_genome) + " _"
-        return genome
 
     def __getitem__(self, idx):
         text = self.texts[idx]
@@ -602,10 +543,7 @@ class GenomeDataset(torch.utils.data.Dataset):
         # print(len(global_attention_mask.tolist()))
         # print(global_attention_mask.tolist())
 
-        if self.ID_list == None:
-            return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
-        else:
-            return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask, self.ID_list[idx]
+        return torch.tensor(decoder_input, dtype=torch.long), torch.tensor(encoder_input, dtype=torch.long), torch.tensor(labels, dtype=torch.long), decoder_attention_mask, encoder_attention_mask, global_attention_mask
 
 class EarlyStopping:
     """
@@ -644,17 +582,11 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
 
-def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size, DDP_active=False):
-    if DDP_active:
-        setup(rank, world_size, args.port)
+def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size):
 
     attention_window=args.attention_window
     max_seq_length = args.max_seq_length
     batch_size = args.batch_size
-    learning_rate = args.learning_rate
-    lr_scheduler_factor = args.lr_scheduler_factor
-    weight_decay = args.weight_decay
-    lr_patience = args.lr_patience
     epochs = args.epochs
     model_save_path = args.model_save_path
     log_dir = args.log_dir
@@ -665,31 +597,30 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
 
     # determine number of GPUs to use
     #num_gpus = torch.cuda.device_count()
-    model = LEDForConditionalGeneration(BARTlongformer_config)
-    if args.gradient_checkpointing == True and DDP_active == False:
-        model.gradient_checkpointing_enable()
-        model.config.use_cache = False
-    
-    
+    model_init = LEDForConditionalGeneration(BARTlongformer_config)
+    model_init.gradient_checkpointing_enable()
+
     # print model params
-    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    pytorch_total_params = sum(p.numel() for p in model_init.parameters() if p.requires_grad)
     logging.info(f"Total model parameters: {pytorch_total_params}")
-    
+
+    # initialize model
+    model, optimizer, _, _ = deepspeed.initialize(
+        model=model_init,
+        #optimizer=optimizer,
+        config=args.deepspeed_config)
+
     device = rank
-    model = model.to(device)
     logging.info(f"device = {device}")
-    if DDP_active:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-        train_sampler = DistributedSampler(train_genomes, num_replicas=world_size, rank=rank, shuffle=True)
-        val_sampler = DistributedSampler(val_genomes, num_replicas=world_size, rank=rank)
-        test_sampler = DistributedSampler(test_genomes, num_replicas=world_size, rank=rank)
-        num_workers = 0
-        pin_memory = False
-        shuffle = False
-    else:
-        train_sampler, val_sampler, test_sampler = None, None, None
-        pin_memory = True
-        shuffle = True
+    rank = model.local_rank
+    
+    #model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+    train_sampler = DistributedSampler(train_genomes, num_replicas=world_size, rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(val_genomes, num_replicas=world_size, rank=rank)
+    test_sampler = DistributedSampler(test_genomes, num_replicas=world_size, rank=rank)
+    num_workers = 0
+    pin_memory = False
+    shuffle = False
     
     # training dataset
     train_dataset = GenomeDataset(train_genomes, tokenizer, max_seq_length, prop_masked, global_contig_breaks)
@@ -698,24 +629,14 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     train_dataset_size = len(train_loader.dataset)
 
     # validation dataset
-    
     val_dataset = GenomeDataset(val_genomes, tokenizer, max_seq_length, prop_masked, global_contig_breaks)
     val_dataset.attention_window = attention_window
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=val_sampler)
     val_dataset_size = len(val_loader.dataset)
 
     criterion = torch.nn.CrossEntropyLoss().to(device) # what are we trying to optimize?
-    # scale lr by number of GPUs used https://github.com/Lightning-AI/pytorch-lightning/discussions/3706#discussioncomment-3960433
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate * math.sqrt(world_size), weight_decay=weight_decay) # How are we trying to optimizer it?
-    lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=lr_scheduler_factor, patience=lr_patience) # taking big, then small steps
 
-    # Use a barrier() to make sure that process 1 loads the model after process
-    # 0 saves it.
-    map_location = None
-    if DDP_active:
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
-        dist.barrier()
-    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, lr_scheduler, model_save_path, restart, map_location)
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, model_save_path, restart)
 
     if rank == 0:
         if is_checkpoint_loaded:
@@ -727,91 +648,69 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
     for epoch in range(start_epoch, epochs):
         # Training model loop
         #train_loader.sampler.set_epoch(epoch)
-        train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training", unit="batch")
+        train_loader = tqdm(train_loader, desc=f"Epoch {epoch} - Training (rank {model.local_rank})", unit="batch")
         total_train_loss = train_model(train_loader, model, optimizer, criterion, device, vocab_size, args.encoder_only, epoch)
 
         total_train_loss_tensor = torch.tensor(total_train_loss).to(rank)
 
-        if DDP_active:
-            dist.all_reduce(total_train_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_train_loss_tensor, op=dist.ReduceOp.SUM)
         avg_train_loss = total_train_loss_tensor.item() / train_dataset_size
         train_perplexity = torch.exp(torch.tensor(avg_train_loss))
         
         # Log training metrics
-        if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
-            logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}, Learning Rate: {optimizer.param_groups[0]["lr"]}')
+        if model.local_rank == 0:  # Only rank 0 should write logs
+            logging.info(f'Epoch {epoch} - Training Loss: {avg_train_loss}, Perplexity: {train_perplexity}')
             writer.add_scalar("Loss/train", avg_train_loss, epoch)
             writer.add_scalar("Perplexity/train", train_perplexity, epoch)
-            writer.add_scalar("Learning_rate/train", optimizer.param_groups[0]["lr"], epoch)
 
         # Validate model loop
         #val_loader.sampler.set_epoch(epoch)
-        val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
-        total_val_loss, total_accuracy, val_precision, val_recall, val_f1 = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
+        val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation (rank {model.local_rank})", unit="batch")
+        total_val_loss, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
         
-        #print("Completed validation", file=sys.stderr)
-
         total_val_loss_tensor = torch.tensor(total_val_loss).to(rank)
-        total_accuracy_tensor = torch.tensor(total_accuracy).to(rank)
         val_precision_tensor = torch.tensor(val_precision).to(rank)
         val_recall_tensor = torch.tensor(val_recall).to(rank)
         val_f1_tensor = torch.tensor(val_f1).to(rank)
-
-        #print("Completed combining loss", file=sys.stderr)
+        val_kappa_tensor = torch.tensor(val_kappa).to(rank)
 
         # get results from all GPUs
-        if DDP_active:
-            dist.all_reduce(total_val_loss_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(total_accuracy_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(val_precision_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(val_recall_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(val_f1_tensor, op=dist.ReduceOp.SUM)
-
-            #print("Completed validation calculations via DDP", file=sys.stderr)
+        dist.all_reduce(total_val_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_precision_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_recall_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_f1_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_kappa_tensor, op=dist.ReduceOp.SUM)
 
         avg_val_loss = total_val_loss_tensor.item() / val_dataset_size
         val_perplexity = torch.exp(torch.tensor(avg_val_loss))
-        val_accuracy = total_accuracy_tensor.item() / val_dataset_size
         val_precision = val_precision_tensor.item() / world_size
         val_recall = val_recall_tensor.item() / world_size
         val_f1 = val_f1_tensor.item() / world_size
-
-        #print("Completed validation calculations", file=sys.stderr)
-
-        # step lr_scheduler, will be synchronised as same value computed across GPUs
-        lr_scheduler.step(avg_val_loss)
+        val_kappa = val_kappa_tensor.item() / world_size
 
         # Log validation metrics
-        if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
-            logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}')
+        if model.local_rank == 0:  # Only rank 0 should write logs
+            logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
             writer.add_scalar("Loss/val", avg_val_loss, epoch)
             writer.add_scalar("Perplexity/val", val_perplexity, epoch)
-            writer.add_scalar("Accuracy/val", val_accuracy, epoch)
             writer.add_scalar("Precision/val", val_precision, epoch)
             writer.add_scalar("Recall/val", val_recall, epoch)
             writer.add_scalar("F1/val", val_f1, epoch)
-            writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
-
-            #print("Completed logging", file=sys.stderr)
-
-            early_stopping(avg_val_loss)
-
-            early_stop_tensor = torch.tensor(int(early_stopping.early_stop)).to(rank)
-
-            #print("Completed early stop calculation", file=sys.stderr)
-            
-            if avg_val_loss <= early_stopping.best_loss:
-                print("Saving model checkpoint.", flush=True)
-                save_checkpoint(model, optimizer, epoch, avg_train_loss, lr_scheduler, model_save_path)
+            writer.add_scalar("Kappa/val", val_kappa, epoch)
 
             gc.collect()
             writer.close()
-        elif (DDP_active and rank != 0):
-            early_stop_tensor = torch.tensor(0).to(rank)
+        # elif model.local_rank != 0:
+        #     early_stop_tensor = torch.tensor(0).to(rank)
+
+        early_stopping(avg_val_loss)
+        early_stop_tensor = torch.tensor(int(early_stopping.early_stop)).to(rank)
+        if avg_val_loss <= early_stopping.best_loss:
+            print("Saving model checkpoint.", flush=True)
+            save_checkpoint(model, epoch, avg_train_loss, model_save_path)
 
         # broadcast to all GPUs, check if early stop triggered
-        if DDP_active:
-            dist.broadcast(early_stop_tensor, src=0)
+        dist.broadcast(early_stop_tensor, src=0)
         if early_stop_tensor.item() == 1:
             print("Early stopping triggered.", flush=True)
             break
@@ -822,42 +721,41 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory, sampler=test_sampler)
         #test_loader.sampler.set_epoch(epoch)
         test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
-        test_loader = tqdm(test_loader, desc="Testing", unit="batch")
+        test_loader = tqdm(test_loader, desc=f"Testing  rank {model.local_rank})", unit="batch")
         # Test Model Loop
-        total_test_loss, total_test_accuracy, test_precision, test_recall, test_f1 = validate_model(test_loader, model, criterion, device, vocab_size, args.encoder_only)
+        total_test_loss, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, args.encoder_only)
         
         total_test_loss_tensor = torch.tensor(total_test_loss).to(rank)
-        total_accuracy_tensor = torch.tensor(total_test_accuracy).to(rank)
         test_precision_tensor = torch.tensor(test_precision).to(rank)
         test_recall_tensor = torch.tensor(test_recall).to(rank)
         test_f1_tensor = torch.tensor(test_f1).to(rank)
+        test_kappa_tensor = torch.tensor(test_kappa).to(rank)
 
         # get results from all GPUs
-        if DDP_active:
-            dist.all_reduce(total_test_loss_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(total_accuracy_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(test_precision_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(test_recall_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(test_f1_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_test_loss_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(test_precision_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(test_recall_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(test_f1_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(test_kappa_tensor, op=dist.ReduceOp.SUM)
         
         avg_test_loss = total_test_loss_tensor.item() / test_dataset_size
         test_perplexity = torch.exp(torch.tensor(avg_test_loss))
-        test_accuracy = total_accuracy_tensor.item() / test_dataset_size
         test_precision = test_precision_tensor.item() / world_size
         test_recall = test_recall_tensor.item() / world_size
         test_f1 = test_f1_tensor.item() / world_size
+        test_kappa = test_kappa_tensor.item() / world_size
 
         # Log test metrics
-        if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
-            logging.info(f'Test Loss: {avg_test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}')
+        if model.local_rank == 0:  # Only rank 0 should write logs
+            logging.info(f'Test Loss: {avg_test_loss}, Perplexity: {test_perplexity}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}, Kappa: {test_kappa}')
             # Create a new SummaryWriter instance for test metrics
             test_writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
             test_writer.add_scalar("Loss/test", avg_test_loss)
             test_writer.add_scalar("Perplexity/test", test_perplexity)
-            test_writer.add_scalar("Accuracy/test", test_accuracy)
             test_writer.add_scalar("Precision/test", test_precision)
             test_writer.add_scalar("Recall/test", test_recall)
             test_writer.add_scalar("F1/test", test_f1)
+            test_writer.add_scalar("Kappa/test", test_kappa)
             test_writer.close()
 
     else:
@@ -970,12 +868,14 @@ def main():
         f"Sequence lengths - Min: {min_sequence_length}, Max: {max_sequence_length}, Avg: {avg_sequence_length:.2f}"
     )
 
-    if not args.reuse_tokenizer:
+    # generate tokenizer
+    if args.generate_tokenizer:
         tokenizer = Tokenizer(models.WordLevel(unk_token="<unk>"))
         tokenizer.pre_tokenizer = pre_tokenizers.CharDelimiterSplit(" ")
         trainer = trainers.WordLevelTrainer(special_tokens=["<unk>", "<s>", "</s>", "<pad>", "<mask>"], vocab_size=vocab_size)
         tokenizer.train_from_iterator(genomes + reversed_genomes, trainer)
         tokenizer.save(tokenizer_path)
+        sys.exit(0)
 
     tokenizer = Tokenizer.from_file(tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
@@ -1002,22 +902,11 @@ def main():
     #total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     #print(f"Total number of trainable parameters: {total_params}", flush=True)
 
-    DDP_active = False
-    world_size = torch.cuda.device_count()
-    if device is None:
-        if world_size > 0:
-            print("{} GPU(s) available, using cuda".format(world_size))
+    # Initialize distributed training
+    deepspeed.init_distributed()
 
-            device = torch.device("cuda") # Run on a GPU if one is available
-            DDP_active = True
-        else:
-            print("GPU not available, using cpu.")
-            device = torch.device("cpu")
-    else:
-        if world_size > 0 and device != "cpu":
-            device = torch.device("cuda:{}".format(device))
-        else:
-            device = torch.device("cpu")
+    torch.cuda.set_device(args.local_rank)
+    device = torch.device("cuda", args.local_rank)
 
     # split genomes if required
     if input_file != None:
@@ -1042,13 +931,7 @@ def main():
                 o.write(entry + "\n")
 
     print(f"vocab_size: {vocab_size} | embed_dim: {embed_dim} | num_heads: {num_heads} | num_layers: {num_layers} | max_seq_length: {max_seq_length}", flush=True)
-    if DDP_active:
-        mp.spawn(run_model,
-                args=(world_size, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size, DDP_active),
-                nprocs=world_size,
-                join=True)
-    else:
-        run_model(device, 1, args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size)
+    run_model(device, dist.get_world_size(), args, early_stopping, BARTlongformer_config, train_genomes, val_genomes, test_genomes, tokenizer, vocab_size)
 
 if __name__ == "__main__":
     main()
