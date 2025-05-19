@@ -15,7 +15,7 @@ import torch.multiprocessing as mp
 import psutil
 import gc
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, cohen_kappa_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 import warnings
 import random
@@ -25,6 +25,7 @@ from transformers import LEDConfig, LEDForConditionalGeneration, LEDTokenizer
 from pathlib import Path
 import random
 import re
+import sys
 
 # Global variables
 PROGRAM_NAME = "panBART"
@@ -360,11 +361,11 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
 
     Returns:
     - tuple: Tuple containing validation metrics (average validation loss, accuracy,
-             precision, recall, F1 score, Cohen's kappa).
+             precision, recall, F1 score).
 
     This function validates the transformer model on the validation dataset,
     computes various validation metrics (average validation loss, accuracy, precision,
-    recall, F1 score, Cohen's kappa), and returns them as a tuple.
+    recall, F1 score), and returns them as a tuple.
     """
 
     model.eval()  # Set the model to evaluation mode
@@ -434,12 +435,16 @@ def validate_model(val_loader, model, criterion, device, vocab_size, encoder_onl
     # Calculate overall metrics from collected predictions and labels
     #avg_val_loss = total_val_loss / dataset_size
     #avg_val_accuracy = total_accuracy / dataset_size
+    
+    #print("Completed all validation queries", file=sys.stderr)
     precision = precision_score(labels_all, preds_all, average='macro', zero_division=0)
+    #print("Completed precision calculation", file=sys.stderr)
     recall = recall_score(labels_all, preds_all, average='macro', zero_division=0)
+    #print("Completed recall calculation", file=sys.stderr)
     f1 = f1_score(labels_all, preds_all, average='macro', zero_division=0)
-    kappa = cohen_kappa_score(labels_all, preds_all)
+    #print("Completed f1 calculation", file=sys.stderr)
 
-    return total_val_loss, total_accuracy, precision, recall, f1, kappa
+    return total_val_loss, total_accuracy, precision, recall, f1
 
 class GenomeDataset(torch.utils.data.Dataset):
     """
@@ -476,6 +481,7 @@ class GenomeDataset(torch.utils.data.Dataset):
     def getitem(self, idx):
         text = self.texts[idx]
         split_genome = text.strip().split("_")
+        split_genome = [x.strip() for x in split_genome]
         genome = "_ " + " _ ".join(split_genome) + " _"
         return genome
 
@@ -741,14 +747,17 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         # Validate model loop
         #val_loader.sampler.set_epoch(epoch)
         val_loader = tqdm(val_loader, desc=f"Epoch {epoch} - Validation", unit="batch")
-        total_val_loss, total_accuracy, val_precision, val_recall, val_f1, val_kappa = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
+        total_val_loss, total_accuracy, val_precision, val_recall, val_f1 = validate_model(val_loader, model, criterion, device, vocab_size, args.encoder_only, epoch)
         
+        #print("Completed validation", file=sys.stderr)
+
         total_val_loss_tensor = torch.tensor(total_val_loss).to(rank)
         total_accuracy_tensor = torch.tensor(total_accuracy).to(rank)
         val_precision_tensor = torch.tensor(val_precision).to(rank)
         val_recall_tensor = torch.tensor(val_recall).to(rank)
         val_f1_tensor = torch.tensor(val_f1).to(rank)
-        val_kappa_tensor = torch.tensor(val_kappa).to(rank)
+
+        #print("Completed combining loss", file=sys.stderr)
 
         # get results from all GPUs
         if DDP_active:
@@ -757,7 +766,8 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             dist.all_reduce(val_precision_tensor, op=dist.ReduceOp.SUM)
             dist.all_reduce(val_recall_tensor, op=dist.ReduceOp.SUM)
             dist.all_reduce(val_f1_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(val_kappa_tensor, op=dist.ReduceOp.SUM)
+
+            #print("Completed validation calculations via DDP", file=sys.stderr)
 
         avg_val_loss = total_val_loss_tensor.item() / val_dataset_size
         val_perplexity = torch.exp(torch.tensor(avg_val_loss))
@@ -765,26 +775,30 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         val_precision = val_precision_tensor.item() / world_size
         val_recall = val_recall_tensor.item() / world_size
         val_f1 = val_f1_tensor.item() / world_size
-        val_kappa = val_kappa_tensor.item() / world_size
+
+        #print("Completed validation calculations", file=sys.stderr)
 
         # step lr_scheduler, will be synchronised as same value computed across GPUs
         lr_scheduler.step(avg_val_loss)
 
         # Log validation metrics
         if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
-            logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}, Kappa: {val_kappa}')
+            logging.info(f'Epoch {epoch} - Validation Loss: {avg_val_loss}, Perplexity: {val_perplexity}, Accuracy: {val_accuracy}, Precision: {val_precision}, Recall: {val_recall}, F1: {val_f1}')
             writer.add_scalar("Loss/val", avg_val_loss, epoch)
             writer.add_scalar("Perplexity/val", val_perplexity, epoch)
             writer.add_scalar("Accuracy/val", val_accuracy, epoch)
             writer.add_scalar("Precision/val", val_precision, epoch)
             writer.add_scalar("Recall/val", val_recall, epoch)
             writer.add_scalar("F1/val", val_f1, epoch)
-            writer.add_scalar("Kappa/val", val_kappa, epoch)
             writer.add_scalar("Learning Rate", optimizer.param_groups[0]["lr"], epoch)
+
+            #print("Completed logging", file=sys.stderr)
 
             early_stopping(avg_val_loss)
 
             early_stop_tensor = torch.tensor(int(early_stopping.early_stop)).to(rank)
+
+            #print("Completed early stop calculation", file=sys.stderr)
             
             if avg_val_loss <= early_stopping.best_loss:
                 print("Saving model checkpoint.", flush=True)
@@ -810,14 +824,13 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         test_dataset_size = len(test_loader.dataset)  # Store the size of the test dataset
         test_loader = tqdm(test_loader, desc="Testing", unit="batch")
         # Test Model Loop
-        total_test_loss, total_test_accuracy, test_precision, test_recall, test_f1, test_kappa = validate_model(test_loader, model, criterion, device, vocab_size, args.encoder_only)
+        total_test_loss, total_test_accuracy, test_precision, test_recall, test_f1 = validate_model(test_loader, model, criterion, device, vocab_size, args.encoder_only)
         
         total_test_loss_tensor = torch.tensor(total_test_loss).to(rank)
         total_accuracy_tensor = torch.tensor(total_test_accuracy).to(rank)
         test_precision_tensor = torch.tensor(test_precision).to(rank)
         test_recall_tensor = torch.tensor(test_recall).to(rank)
         test_f1_tensor = torch.tensor(test_f1).to(rank)
-        test_kappa_tensor = torch.tensor(test_kappa).to(rank)
 
         # get results from all GPUs
         if DDP_active:
@@ -826,7 +839,6 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             dist.all_reduce(test_precision_tensor, op=dist.ReduceOp.SUM)
             dist.all_reduce(test_recall_tensor, op=dist.ReduceOp.SUM)
             dist.all_reduce(test_f1_tensor, op=dist.ReduceOp.SUM)
-            dist.all_reduce(test_kappa_tensor, op=dist.ReduceOp.SUM)
         
         avg_test_loss = total_test_loss_tensor.item() / test_dataset_size
         test_perplexity = torch.exp(torch.tensor(avg_test_loss))
@@ -834,11 +846,10 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
         test_precision = test_precision_tensor.item() / world_size
         test_recall = test_recall_tensor.item() / world_size
         test_f1 = test_f1_tensor.item() / world_size
-        test_kappa = test_kappa_tensor.item() / world_size
 
         # Log test metrics
         if (DDP_active and rank == 0) or DDP_active == False:  # Only rank 0 should write logs
-            logging.info(f'Test Loss: {avg_test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}, Kappa: {test_kappa}')
+            logging.info(f'Test Loss: {avg_test_loss}, Perplexity: {test_perplexity}, Accuracy: {test_accuracy}, Precision: {test_precision}, Recall: {test_recall}, F1: {test_f1}')
             # Create a new SummaryWriter instance for test metrics
             test_writer = SummaryWriter(log_dir=os.path.join(log_dir, "test"))
             test_writer.add_scalar("Loss/test", avg_test_loss)
@@ -847,7 +858,6 @@ def run_model(rank, world_size, args, early_stopping, BARTlongformer_config, tra
             test_writer.add_scalar("Precision/test", test_precision)
             test_writer.add_scalar("Recall/test", test_recall)
             test_writer.add_scalar("F1/test", test_f1)
-            test_writer.add_scalar("Kappa/test", test_kappa)
             test_writer.close()
 
     else:
