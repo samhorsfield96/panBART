@@ -146,11 +146,11 @@ class CustomTokenizer:
         self.tokenizer = tokenizer
 
     def __call__(self, s):
-        print(f"self.tokenizer.encode(s).ids: {self.tokenizer.encode(s).ids}")
+        #print(f"self.tokenizer.encode(s).ids: {self.tokenizer.encode(s).ids}")
         return {"input_ids": self.tokenizer.encode(s).ids}
 
     def decode(self, a):
-        print(f"self.tokenizer.decode(a, skip_special_tokens=False): {self.tokenizer.decode(a, skip_special_tokens=False)}")
+        #print(f"self.tokenizer.decode(a, skip_special_tokens=False): {self.tokenizer.decode(a, skip_special_tokens=False)}")
         return self.tokenizer.decode(a, skip_special_tokens=False)
 
 def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed, args):
