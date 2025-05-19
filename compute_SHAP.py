@@ -48,61 +48,6 @@ def load_dataset(input_file):
         print(f"An error occurred while reading the file: {e}")
         exit(1)
 
-def pad_input(input, max_seq_length, pad_token_id, labels=False):
-
-    len_masked = len(input)
-
-    # cut sequence to correct length
-    if len_masked > max_seq_length:
-        input = input[:max_seq_length]
-    len_masked = len(input)
-    
-    # only pad if necessary
-    if labels == False:
-        input.extend([pad_token_id] * (max_seq_length - len_masked))
-    else:
-        input.extend([-100] * (max_seq_length - len_masked))
-
-    return input
-
-def tokenise_input(text, tokenizer, max_seq_length, pad_token, mask_token):
-    input = tokenizer.encode(text).ids
-
-    # mask original text
-    text = tokenizer.decode(input[1:], skip_special_tokens=False)
-    text_masked = mask_integers(text, 0)
-
-    encoder_input = tokenizer.encode(text_masked).ids
-    decoder_input = input[:-1]
-
-    len_decoder = len(decoder_input)
-    decoder_input = pad_input(decoder_input, max_seq_length, pad_token)
-
-    decoder_attention_mask = torch.ones(len(decoder_input), dtype=torch.long)
-    decoder_attention_mask[len_decoder:] = 0
-
-    # merge consecutive masks into single mask token
-    # might be issue, might not need to block mask
-    encoder_input = ' '.join([str(i) for i in encoder_input])
-    pattern = f'({mask_token} )+'
-    encoder_input = re.sub(pattern, str(mask_token) + ' ', encoder_input)
-    pattern = f'( {mask_token})+'
-    encoder_input = re.sub(pattern, ' ' + str(mask_token), encoder_input)
-    encoder_input = [int(i) for i in encoder_input.split()]
-
-    len_masked = len(encoder_input)
-    encoder_input = pad_input(encoder_input, max_seq_length, pad_token)
-
-    encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
-    encoder_attention_mask[len_masked:] = 0
-
-    # attend to all contig breaks
-    global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
-    break_idx = np.flatnonzero(np.array(encoder_input) == int(tokenizer.encode("_").ids[0]))
-    global_attention_mask[break_idx] = 1
-
-    return torch.tensor(decoder_input, dtype=torch.long).unsqueeze(0), torch.tensor(encoder_input, dtype=torch.long).unsqueeze(0), decoder_attention_mask.unsqueeze(0), encoder_attention_mask.unsqueeze(0), global_attention_mask.unsqueeze(0)
-
 def parse_args():
     """
     Parse command-line arguments.
@@ -168,12 +113,12 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, a
     outputs = []
     model.eval()
 
-    #print(f"x: {x}")
+    print(f"x: {x}")
     dataset = GenomeDataset(x, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
     for _x in loader:
-        #print(_x)
+        print(f"_x: {_x}")
         decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask = _x
         #print(f"encoder_input: {encoder_input}")
         #print(pos)
@@ -196,26 +141,17 @@ def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, a
     return val
 
 #may need to change this to use the correct tokenizer
-def custom_tokenizer(s, tokenizer, return_offsets_mapping=True):
-    """Wraps a Tokenizers tokenizer to conform to SHAP's expectations."""
-    
-    # Tokenize using the Tokenizers package
-    encoding = tokenizer.encode(s)
-    
-    # Extract input_ids and offset mapping
-    input_ids = encoding.ids
-    if return_offsets_mapping:
-        offset_ranges = encoding.offsets
-    else:
-        offset_ranges = None
-    
-    # Format the output to match the transformers-like format
-    out = {"input_ids": input_ids}
-    if return_offsets_mapping:
-        out["offset_mapping"] = offset_ranges
-    #print(s)
-    #print(out["offset_mapping"])
-    return out
+class CustomTokenizer:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, s):
+        print(f"self.tokenizer.encode(s).ids: {self.tokenizer.encode(s).ids}")
+        return {"input_ids": self.tokenizer.encode(s).ids}
+
+    def decode(self, a):
+        print(f"self.tokenizer.decode(a, skip_special_tokens=False): {self.tokenizer.decode(a, skip_special_tokens=False)}")
+        return self.tokenizer.decode(a, skip_special_tokens=False)
 
 def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed, args):
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
@@ -234,13 +170,15 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
     #print(labels)
 
     # create partial tokenizer
-    tokenizer_partial = partial(custom_tokenizer, tokenizer=tokenizer)
+    custom_tokenizer = CustomTokenizer(tokenizer)
     # issue might be how masker is working, if it truncates sequences rather than just masking positions.
-    masker = shap.maskers.Text(tokenizer=tokenizer_partial, mask_token="<mask>", collapse_mask_token=False)
+    masker = shap.maskers.Text(tokenizer=custom_tokenizer, mask_token="<mask>", collapse_mask_token=False)
 
     shap_values_list = []
     for idx, element in enumerate(prompt_list):
+        #print(f"element: {element}")
         split_element = element.split(" ")
+        #print(f"split_element: {split_element}")
         # only look if element is present
         if target_token in split_element:
             # get positions of elements
@@ -262,8 +200,9 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1, seed=seed)
 
                 # change indices to masks one at a time to ensure token doesn't impact on itself
-                split_element[pos] = "<mask>"
-                new_element = " ".join(split_element)
+                new_element = split_element
+                new_element[pos] = "<mask>"
+                new_element = " ".join(new_element)
 
                 #print(f"new_element: {new_element}")
 
@@ -283,10 +222,15 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
                 # to get the shap value for a given position X on the token of interest Y,
                 # need to get .base_values[Y] + .values[X, Y]
 
-                #print(shap_values.values.shape)
+                #print(f"shap_values.values.shape: {shap_values.values.shape}")
                 #print(shap_values.base_values.shape)
 
-                #print(shap_values)
+                #print(f"shap_values: {shap_values}")
+                #print(f"shap_values.data[0].shape: {shap_values.data[0].shape}")
+                #print(f"shap_values.data: {shap_values.data[0].tolist()}")
+                
+                #print(f"labels: {labels}")
+                #print(f"split_element: {split_element}")
 
                 # generate output array, concatenate base values to each row
                 #output_array = (shap_values.values + shap_values.base_values).squeeze(0).T
