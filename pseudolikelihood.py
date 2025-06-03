@@ -17,6 +17,7 @@ import random
 from torch.utils.data import DataLoader, DistributedSampler
 from panGPT import GenomeDataset, load_dataset
 from collections import defaultdict
+import statistics
 
 logging.set_verbosity_error()
 
@@ -120,7 +121,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
 
             total_len = encoder_input.size(1)
-            log_pseudo_likelihood = 0.0
+            log_pseudo_likelihood = []
             for i in range(0, total_len, max_seq_length):
                 # print("max_seq_length exceeded: {}".format(total_len > max_seq_length))
 
@@ -146,7 +147,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                         outputs = model(input_ids=masked_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
 
                         log_pseudo_likelihood_gene, original_token_id = get_pseudolikelihood(outputs, j, batch_encoder_input)
-                        log_pseudo_likelihood += log_pseudo_likelihood_gene
+                        log_pseudo_likelihood.append(log_pseudo_likelihood_gene)
 
                         if per_gene:
                             gene_dict[original_token_id].append(log_pseudo_likelihood_gene)
@@ -179,7 +180,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                         outputs = model(input_ids=masked_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits  # Generate predictions
 
                         log_pseudo_likelihood_gene, original_token_id = get_pseudolikelihood(outputs, j, batch_encoder_input)
-                        log_pseudo_likelihood += log_pseudo_likelihood_gene
+                        log_pseudo_likelihood.append(log_pseudo_likelihood_gene)
 
                         if per_gene:
                             gene_dict[original_token_id].append(log_pseudo_likelihood_gene)
@@ -195,7 +196,17 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                     del batch_global_attention_mask
 
             #print(log_pseudo_likelihood)
-            log_pseudo_likelihood_list.append(log_pseudo_likelihood)
+            min_log_pseudo_likelihood = min(log_pseudo_likelihood)
+            max_log_pseudo_likelihood = max(log_pseudo_likelihood)
+            sum_log_pseudo_likelihood = sum(log_pseudo_likelihood)
+            mean_log_pseudo_likelihood = sum_log_pseudo_likelihood / len(log_pseudo_likelihood)
+            std_log_pseudo_likelihood = statistics.stdev(log_pseudo_likelihood)
+            quartiles = np.quantile(log_pseudo_likelihood, [0.25,0.5,0.75])
+            median_log_pseudo_likelihood = quartiles[1]
+            lq_log_pseudo_likelihood = quartiles[0]
+            uq_log_pseudo_likelihood = quartiles[2]
+
+            log_pseudo_likelihood_list.append((min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood))
 
     return log_pseudo_likelihood_list, gene_dict
 
@@ -359,9 +370,10 @@ def main():
                     f.write("{}\t{}\n".format(key, value)) 
 
     with open(args.outpref + "_pseudolikelihood.txt", "w") as f:
-        f.write("Index\tlog_pseudolikelihood\n")
-        for index, likelihood in enumerate(return_list):
-            f.write(str(index) + "\t" + str(likelihood) + "\n")
+        f.write("Index\tmin\tmax\tsum\tmean\tstddev\tlq\tmedian\tuq\n")
+        for index, entry in enumerate(return_list):
+            min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood = entry
+            f.write(f"{str(index)}\t{str(min_log_pseudo_likelihood)}\t{str(max_log_pseudo_likelihood)}\t{str(sum_log_pseudo_likelihood)}\t{str(mean_log_pseudo_likelihood)}\t{str(std_log_pseudo_likelihood)}\t{str(lq_log_pseudo_likelihood)}\t{str(median_log_pseudo_likelihood)}\t{str(uq_log_pseudo_likelihood)}\n")
 
     if DDP_active:
         cleanup()
