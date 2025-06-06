@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
     parser.add_argument("--per-gene", default=False, action="store_true", help="Calculate per-gene pseudolikelihoods")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
+    parser.add_argument("--ignore_unknown", default=False, action="store_true", help="Ignore unknown tokens during calculations.")
     parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
 
     args = parser.parse_args()
@@ -109,10 +110,11 @@ def get_pseudolikelihood(outputs, i, batch_encoder_input):
     
     return log_pseudo_likelihood, original_token_id
 
-def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, per_gene):
+def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length, encoder_only, per_gene, ignore_unknown):
     model.eval()
     mask_token = tokenizer.encode("<mask>").ids[0]
     pad_token = tokenizer.encode("<pad>").ids[0]
+    unk_token = tokenizer.encode("<unk>").ids[0]
 
     log_pseudo_likelihood_list = []
     gene_dict = defaultdict(list)
@@ -136,10 +138,13 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                             token_count = j
                             break
                         
+                    # break at pad token, or skip if at unknown token
                     for j in tqdm(range(token_count)):
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
+                        elif masked_encoder_input[0, j] == unk_token and ignore_unknown:
+                            continue
                         
                         masked_encoder_input[0, j] = mask_token
                         masked_encoder_input = masked_encoder_input.to(device)
@@ -170,10 +175,13 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
                             token_count = j
                             break
 
+                    # break at pad token, or skip if at unknown token
                     for j in tqdm(range(token_count)):
                         masked_encoder_input = batch_encoder_input.clone()
                         if masked_encoder_input[0, j] == pad_token:
                             break
+                        elif masked_encoder_input[0, j] == unk_token and ignore_unknown:
+                            continue
 
                         masked_encoder_input[0, j] = mask_token
                     
@@ -236,7 +244,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, None, args.ignore_unknown)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
@@ -259,7 +267,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    log_pseudolikelihood_list, gene_dict = calculate_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.per_gene)
+    log_pseudolikelihood_list, gene_dict = calculate_pseudolikelihood(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.per_gene, args.ignore_unknown)
     
     return_list.extend(log_pseudolikelihood_list)
     gene_list.append(gene_dict)

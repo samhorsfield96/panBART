@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
     parser.add_argument("--pooling", choices=['mean', 'max'], help="Pooling for embedding generation. Defaualt = 'mean'.")
+    parser.add_argument("--ignore_unknown", default=False, action="store_true", help="Ignore unknown tokens during calculations.")
     parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
 
     args = parser.parse_args()
@@ -229,7 +230,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, genome_labels)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, genome_labels, args.ignore_unknown)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     

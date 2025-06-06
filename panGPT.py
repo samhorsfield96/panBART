@@ -462,18 +462,20 @@ class GenomeDataset(torch.utils.data.Dataset):
     - __getitem__(idx): Get an item from the dataset by index.
     """
 
-    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True, ID_list=None):
+    def __init__(self, texts, tokenizer, max_length, prop_masked, global_contig_breaks, shuffle=True, ID_list=None, ignore_unknown=False):
         self.tokenizer = tokenizer
         self.texts = texts
         self.max_length = max_length
         self.prop_masked = prop_masked
         self.mask_token = self.tokenizer.encode("<mask>").ids[0]
+        self.unk_token = self.tokenizer.encode("<unk>").ids[0]
         self.pad_token = self.tokenizer.encode("<pad>").ids[0]
         self.bos_token = self.tokenizer.encode("<s>").ids[0]
         self.eos_token = self.tokenizer.encode("</s>").ids[0]
         self.global_contig_breaks = global_contig_breaks
         self.shuffle = shuffle
         self.ID_list = ID_list
+        self.ignore_unknown = ignore_unknown
 
     def __len__(self):
         return len(self.texts)
@@ -569,13 +571,16 @@ class GenomeDataset(torch.utils.data.Dataset):
         #print('encoder_input post padding')
         #print(encoder_input)
 
-        # do not attend to mask tokens
-        #print(int(self.mask_token))
-        #mask_idx = np.flatnonzero(np.array(encoder_input) == int(self.mask_token))
-
         encoder_attention_mask = torch.ones(len(encoder_input), dtype=torch.long)
         encoder_attention_mask[len_masked:] = 0
-        #encoder_attention_mask[mask_idx] = 0
+
+        # do not attend to unk tokens
+        if self.ignore_unknown:
+            unk_idx = np.flatnonzero(np.array(encoder_input) == int(self.unk_token))
+            encoder_attention_mask[unk_idx] = 0
+
+            unk_idx = np.flatnonzero(np.array(decoder_input) == int(self.unk_token))
+            decoder_attention_mask[unk_idx] = 0
 
         # attend to all contig breaks
         global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
