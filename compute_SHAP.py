@@ -24,29 +24,18 @@ from panGPT import GenomeDataset
 
 logging.set_verbosity_error()
 
-def load_dataset(input_file):
-    """
-    Load the dataset from the input file.
+def read_prompt_file(file_path):
 
-    Args:
-    - input_file (str): Path to the input file containing the dataset.
-
-    Returns:
-    - list: List of strings, each representing a genome sequence.
-
-    This function reads the contents of the input file, which contains genome sequences,
-    and returns a list of genome sequences.
-    """
-    try:
-        with open(input_file, "r") as file:
-            genomes = ["_ " + genome.strip() + " _" for genome in file.readlines()]
-        return genomes
-    except FileNotFoundError:
-        print(f"Error: The input file '{input_file}' was not found.")
-        exit(1)
-    except Exception as e:
-        print(f"An error occurred while reading the file: {e}")
-        exit(1)
+    # ensure genomes are placed in the same order and are present
+    genome_id_list = []
+    prompt_list = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            split_line = line.strip().split("\t")
+            genome_id_list.append(split_line[0])
+            prompt_list.append(split_line[1])
+    
+    return prompt_list, genome_id_list
 
 def parse_args():
     """
@@ -58,7 +47,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Token prediction with a Transformer or Reformer model.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
     parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
-    parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
+    parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt, must contain genome ids and genomes in tab separated format.")
     parser.add_argument("--target-token", type=str, required=True, help="Target token to search for")
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
@@ -109,28 +98,31 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
 
 
 # this defines an explicit python function that takes a list of strings and outputs scores for each class
-def f(x, model, device, tokenizer, max_seq_length, pad_token, mask_token, pos, args, encoder_only=False):
+def f(x, model, device, tokenizer, max_seq_length, pos, args, encoder_only=False):
     outputs = []
     model.eval()
 
-    print(f"x: {x}")
+    #print(f"x: {x}")
     dataset = GenomeDataset(x, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
     for _x in loader:
-        print(f"_x: {_x}")
+        #print(f"_x: {_x}")
         decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask = _x
         #print(f"encoder_input: {encoder_input}")
         #print(pos)
         if encoder_only:
             batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
+            #encoder same input so do not adjust
+            outputs.append(output[0][pos])
         else:
             batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
         
-        #print(output)
-        outputs.append(output[0][pos])
+            #print(output)
+            #decoder shifted one to right, so adjust accordingly
+            outputs.append(output[0][pos - 1])
 
     # save all scores in same output
     #outputs = output[0]
@@ -153,11 +145,8 @@ class CustomTokenizer:
         #print(f"self.tokenizer.decode(a, skip_special_tokens=False): {self.tokenizer.decode(a, skip_special_tokens=False)}")
         return self.tokenizer.decode(a, skip_special_tokens=False)
 
-def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed, args):
+def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encoder_only, target_token, outpref, seed, args, genome_labels=None, both_strands=False):
     # follow this example https://shap.readthedocs.io/en/latest/example_notebooks/text_examples/sentiment_analysis/Using%20custom%20functions%20and%20tokenizers.html
-    mask_token = tokenizer.encode("<mask>").ids[0]
-    pad_token = tokenizer.encode("<pad>").ids[0]
-    target_token_encoded = tokenizer.encode(target_token).ids[0]
 
     # Get the vocabulary dictionary: {token: token_id}
     vocab_dict = tokenizer.get_vocab()
@@ -180,88 +169,82 @@ def calculate_SHAP(model, tokenizer, prompt_list, device, max_seq_length, encode
         split_element = element.split(" ")
         #print(f"split_element: {split_element}")
         # only look if element is present
-        if target_token in split_element:
-            # get positions of elements
-            positions = [index for index, value in enumerate(split_element) if value == target_token]
 
-            # increment through each position is found in
-            for pos in positions:
-                # need to add pos+1 as output is one token shuffled from input
-                # if encoder_only == False:
-                #     target_pos = pos + 1
-                # else:
-                #     target_pos = pos
-                target_pos = pos
-                
-                # create partial function
-                f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pad_token=pad_token, mask_token=mask_token, pos=target_pos, args=args, encoder_only=encoder_only)
-                
-                # set max_evals to be same as permutations required for position to be masked and unmasked
-                explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1, seed=seed)
+        # look for both strands of gene
+        if both_strands:
+            target_token_tup = (target_token, str(int(target_token) * -1))
+        else:
+            target_token_tup = (target_token)
 
-                # change indices to masks one at a time to ensure token doesn't impact on itself
-                new_element = split_element
-                new_element[pos] = "<mask>"
-                new_element = " ".join(new_element)
+        for token in target_token_tup:
+            if token in split_element:
+                # get positions of elements
+                positions = [index for index, value in enumerate(split_element) if value == token]
 
-                #print(f"new_element: {new_element}")
+                # increment through each position is found in
+                for pos in positions:
+                    # need to add pos+1 as output is one token shuffled from input
+                    # if encoder_only == False:
+                    #     target_pos = pos + 1
+                    # else:
+                    #     target_pos = pos
+                    target_pos = pos
+                    
+                    # create partial function
+                    f_partial = partial(f, model=model, device=device, tokenizer=tokenizer, max_seq_length=max_seq_length, pos=target_pos, args=args, encoder_only=encoder_only)
+                    
+                    # set max_evals to be same as permutations required for position to be masked and unmasked
+                    explainer = shap.PartitionExplainer(f_partial, masker, output_names=labels, max_evals= 2 * min(len(split_element), max_seq_length) + 1, seed=seed)
 
-                # dataset = GenomeDataset([new_element], tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
-                # dataset.attention_window = args.attention_window
-                # loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
+                    # change indices to masks one at a time to ensure token doesn't impact on itself
+                    new_element = split_element
+                    new_element[pos] = "<mask>"
+                    new_element = " ".join(new_element)
 
-                # for tensor_set in loader:
-                #     shap_values = explainer([tensor_set])
+                    #print(f"new_element: {new_element}")
 
-                shap_values = explainer([new_element])
+                    # dataset = GenomeDataset([new_element], tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
+                    # dataset.attention_window = args.attention_window
+                    # loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
 
-                # shap_values has three class objects:
-                # .values: of shape (1, N_positions, N_token_ids)
-                # .base_values: of shape (1, N_token_ids)
-                # .data: list of all input data tokens
-                # to get the shap value for a given position X on the token of interest Y,
-                # need to get .base_values[Y] + .values[X, Y]
+                    # for tensor_set in loader:
+                    #     shap_values = explainer([tensor_set])
 
-                #print(f"shap_values.values.shape: {shap_values.values.shape}")
-                #print(shap_values.base_values.shape)
+                    shap_values = explainer([new_element])
 
-                #print(f"shap_values: {shap_values}")
-                #print(f"shap_values.data[0].shape: {shap_values.data[0].shape}")
-                #print(f"shap_values.data: {shap_values.data[0].tolist()}")
-                
-                #print(f"labels: {labels}")
-                #print(f"split_element: {split_element}")
+                    # shap_values has three class objects:
+                    # .values: of shape (1, N_positions, N_token_ids)
+                    # .base_values: of shape (1, N_token_ids)
+                    # .data: list of all input data tokens
+                    # to get the shap value for a given position X on the token of interest Y,
+                    # need to get .base_values[Y] + .values[X, Y]
 
-                # generate output array, concatenate base values to each row
-                #output_array = (shap_values.values + shap_values.base_values).squeeze(0).T
-                #print(output_array.shape)
+                    #print(f"shap_values.values.shape: {shap_values.values.shape}")
+                    #print(shap_values.base_values.shape)
 
-                df = pd.DataFrame(shap_values.values.squeeze(0).T, index=labels, columns=split_element)
-                df["base_value"] = shap_values.base_values.squeeze(0).T
+                    #print(f"shap_values: {shap_values}")
+                    #print(f"shap_values.data[0].shape: {shap_values.data[0].shape}")
+                    #print(f"shap_values.data: {shap_values.data[0].tolist()}")
+                    
+                    #print(f"labels: {labels}")
+                    #print(f"split_element: {split_element}")
 
-                # Display the DataFrame
-                df.to_csv(outpref + "_geneid_" + str(target_token) + "_fileidx_" + str(idx) + "_pos_" + str(pos) + ".csv", index=True)
+                    # generate output array, concatenate base values to each row
+                    #output_array = (shap_values.values + shap_values.base_values).squeeze(0).T
+                    #print(output_array.shape)
 
-def read_prompt_file(file_path):
-    prompt_list = []
-    with open(file_path, 'r') as file:
-        for line in file:
-            prompt_list.append(line.strip())
-    return prompt_list
+                    df = pd.DataFrame(shap_values.values.squeeze(0).T, index=labels, columns=split_element)
+                    df["base_value"] = shap_values.base_values.squeeze(0).T
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, target_token):
+                    # Display the DataFrame
+                    if genome_labels != None:
+                        df.to_csv(outpref + "_" + str(genome_labels[idx]) + "_geneid_" + str(token) + "_pos_" + str(pos) + ".csv", index=True)
+                    else:
+                        df.to_csv(outpref  + "_fileidx_" + str(idx) + "_geneid_" + str(token) + "_pos_" + str(pos) + ".csv", index=True)
+
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, genome_labels, DDP_active, encoder_only, target_token):
     if DDP_active:
         setup(rank, world_size, args.port)
-        #prompt_list = prompt_list[rank]
-        sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
-        num_workers = 0
-        pin_memory = False
-        shuffle = False
-    else:
-        sampler = None
-        pin_memory = True
-        shuffle = False
-        num_workers=1
         
     model = LEDForConditionalGeneration(BARTlongformer_config)
     device = rank
@@ -282,7 +265,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref, args.seed, args)
+    calculate_SHAP(model, tokenizer, prompt_list, device, args.max_seq_length, encoder_only, target_token, args.outpref, args.seed, args, genome_labels, True)
 
         
 def main():
@@ -332,7 +315,7 @@ def main():
         else:
             device = torch.device("cpu")
 
-    prompt_list = load_dataset(args.prompt_file)
+    prompt_list, genome_labels = read_prompt_file(args.prompt_file)
 
     # randomise
     if args.randomise:
@@ -345,22 +328,26 @@ def main():
     if args.max_input_len != None:
         # len_list = [len(genome.split()) for genome in prompt_list]
         # print(len_list)
-        prompt_list = [genome for genome in prompt_list if len(genome.split()) <= args.max_input_len]
+        prompt_list_tup = [(genome, genome_id) for genome, genome_id in zip(prompt_list, genome_labels) if len(genome.split()) <= args.max_input_len]
+        prompt_list = [entry[0] for entry in prompt_list_tup]
+        genome_labels = [entry[1] for entry in prompt_list_tup]
 
     if args.min_input_len != None:
         # len_list = [len(genome.split()) for genome in prompt_list]
         # print(len_list)
-        prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
+        prompt_list_tup = [(genome, genome_id) for genome, genome_id in zip(prompt_list, genome_labels) if len(genome.split()) >= args.max_input_len]
+        prompt_list = [entry[0] for entry in prompt_list_tup]
+        genome_labels = [entry[1] for entry in prompt_list_tup]
 
     if DDP_active:
         #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, genome_labels, DDP_active, args.encoder_only, args.target_token),
                     nprocs=world_size,
                     join=True)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, args.target_token)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, genome_labels, DDP_active, args.encoder_only, args.target_token)
     
 
     if DDP_active:
