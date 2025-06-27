@@ -67,6 +67,9 @@ def mask_integers(string, prop_masked):
 
         # sample number sites from poisson
         num_to_mask = np.random.poisson(num_to_mask)
+        if num_to_mask >= len(integer_indices):
+            num_to_mask = len(integer_indices)
+            
         indices_to_mask = np.random.choice(range(len(integer_indices)), size=num_to_mask, replace=False)
 
         # Replace selected indices with "[MASK]"

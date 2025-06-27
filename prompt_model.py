@@ -14,10 +14,52 @@ from multiprocessing import Manager
 import torch.multiprocessing as mp
 from panGPT import setup, cleanup, GenomeDataset, load_dataset
 import random
-from panGPT import mask_integers
+from panGPT import mask_integers, flip_contig
 from torch.utils.data import DataLoader, DistributedSampler
 
 logging.set_verbosity_error()
+
+def jaccard_distance(A, B):
+    set_A = set(abs(g) for g in A)
+    set_B = set(abs(g) for g in B)
+    intersection = len(set_A & set_B)
+    union = len(set_A | set_B)
+    return 1 - intersection / union if union > 0 else 0
+
+def breakpoint_distance(A, B):
+    # Map gene to position in A
+    gene_to_pos_A = {abs(g): i for i, g in enumerate(A)}
+    # Keep only common genes
+    common_genes = set(abs(g) for g in A) & set(abs(g) for g in B)
+    A_filtered = [g for g in A if abs(g) in common_genes]
+    B_filtered = [g for g in B if abs(g) in common_genes]
+
+    # Map B genes to A positions
+    pos_B = [gene_to_pos_A[abs(g)] for g in B_filtered]
+    # Add sentinels at start and end
+    pos_B = [-1] + pos_B + [len(A_filtered)]
+    
+    breakpoints = sum(1 for i in range(len(pos_B)-1) if pos_B[i+1] - pos_B[i] != 1)
+    max_possible = len(A_filtered) + 1  # Normalizing factor
+    return breakpoints / max_possible if max_possible > 0 else 0
+
+def shuffle_genome(genome):
+    split_genome = genome.strip().split("_")
+    # randomise contig order and flip randomly
+
+    #flip_contigs = [random.random() < 0.5 for _ in range(len(split_genome))]
+    #print(split_genome)
+    #print(flip_contigs)
+
+    #for index, contig in enumerate(split_genome):
+    #    if flip_contigs[index]:
+    #        split_genome[index] = flip_contig(contig.strip())
+    #    else:
+    #        split_genome[index] = contig.strip()
+
+    #print(split_genome)
+    random.shuffle(split_genome)
+    return split_genome
 
 def parse_args():
     """
@@ -39,11 +81,13 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Maximum batch size for simulation. Default = 16")
     parser.add_argument("--device", type=str, default=None, help="Device to run the model on (e.g., 'cpu' or 'cuda').")
     parser.add_argument("--attention_window", type=int, default=512, help="Attention window size in the Longformer model (default: 512)")
-    parser.add_argument("--prop_masked", type=float, default=0.15, help="Proportion of prompt to be masked. Default = 0.15")
+    parser.add_argument("--prop_masked", type=float, default=0.15, help="Proportion of prompt to be masked for encoder. Default = 0.15")
+    parser.add_argument("--prop_prompt_kept", type=float, default=1.0, help="Proportion of prompt from start to be kept before encoding. If 0.0, keeps one contig break marker. Default = 0.0")
+    parser.add_argument("--shuffle_genomes", default=False, action="store_true", help="Shuffle order of contigs for prompt.")
     parser.add_argument("--max_input_len", type=int, default=None, help="Maximum length of input sequence. No limit if not set.")
     parser.add_argument("--min_input_len", type=int, default=None, help="Minimum length of input sequence. No limit if not set.")
     parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
-    parser.add_argument("--outfile", type=str, default="simulated_genomes.txt", help="Output file for simulated genomes. Default = 'simulated_genomes.txt'")
+    parser.add_argument("--outpref", type=str, default="simulated_genomes", help="Output file for simulated genomes. Default = 'simulated_genomes'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
     parser.add_argument("--generate", default=False, action="store_true", help="Generate iteratively instead of as a block.")
@@ -79,17 +123,21 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
     model.config.use_cache = True
     return model
 
-def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only, generate, DDP_active):
+def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only, generate, DDP_active, prompt_list_truth):
     model.eval()
 
     predictions = []
-    accuracy_list = []
+    jaccard_accuracy_list = []
+    breakpoint_accuracy_list = []
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
         for _ in range(num_seq):
-            for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
-    
-                total_len = encoder_input.size(1)
+            for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask, idx in loader:  # Correctly unpack the tuples returned by the DataLoader
+                
+                # get real sequence to compare to
+                real_seq = prompt_list_truth[idx]
+
+                total_len = len(real_seq) #encoder_input.size(1)
                 current_sequence = []
                 current_accuracy_list = []
                 for i in range(0, total_len, max_seq_length):
@@ -210,35 +258,30 @@ def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_
                     current_sequence.append(preds)
             
                 # concatenate predictions and get average accuracy
-                current_accuracy = sum(current_accuracy_list) / len(current_accuracy_list)
+                #current_accuracy = sum(current_accuracy_list) / len(current_accuracy_list)
                 #print("accuracy: {}".format(round(current_accuracy, 4)))
-                accuracy_list.append(round(current_accuracy, 4))
+                #accuracy_list.append(round(current_accuracy, 4))
                 current_sequence = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in current_sequence]
                 sequence = torch.cat(current_sequence, dim=1).tolist()[0]
+                
+                sequence = tokenizer.decode(sequence, skip_special_tokens=True)
+
+                # get jaccard and breakpoint distance
+                jaccard_dist = jaccard_distance(sequence, real_seq)
+                break_dist = breakpoint_distance(sequence, real_seq)
+                jaccard_accuracy_list.append(jaccard_dist)
+                breakpoint_accuracy_list.append(break_dist)
+
                 #print(sequence)
                 predictions.append(sequence)
-
-    predictions = [tokenizer.decode(seq, skip_special_tokens=True) for seq in predictions]
-    
-    return_list = [(acc, seq) for acc, seq in zip(accuracy_list, predictions)]
+   
+    return_list = [(jdist, breakdist, seq) for acc, seq in zip(jaccard_accuracy_list, breakpoint_accuracy_list, predictions)]
 
     return return_list
 
-def read_prompt_file(file_path):
-    prompt_list = []
-    with open(file_path, 'r') as file:
-        for line in file:
-            prompt_list.append(line.strip())
-    return prompt_list
-
-def split_prompts(prompts, world_size):
-    # Split prompts into approximately equal chunks for each GPU
-    chunk_size = len(prompts) // world_size
-    return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
-
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, prompt_list_truth, return_list):
     if DDP_active:
-        setup(rank, world_size)
+        setup(rank, world_size, args.port)
         #prompt_list = prompt_list[rank]
         sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
         num_workers = 0
@@ -250,7 +293,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked, args.global_contig_breaks, False)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked, args.global_contig_breaks, False, ID_list=list(range(0,len(prompt_list_truth))))
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
@@ -273,7 +316,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only, args.generate, DDP_active)
+    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only, args.generate, DDP_active, prompt_list_truth)
     
     return_list.extend(predicted_text)
 
@@ -338,22 +381,33 @@ def main():
         # print(len_list)
         prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
 
+    if args.shuffle_genomes:
+        prompt_list = [shuffle_genome(genome) for genone in prompt_list]
+
+    prompt_list_truth = prompt_list
+    if args.prop_prompt_removed < 1.0:
+        if args.prop_prompt_removed == 0.0:
+            prompt_list = ["_" for genone in prompt_list]
+        else:
+            prompt_list = [genome[0:int(len(genome) * args.prop_prompt_removed)] for genome in prompt_list]
+
     return_list = []
     if DDP_active:
-        #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, prompt_list_truth, mp_list),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, prompt_list_truth, return_list)
     
-    with open(args.outfile, "w") as f:
-        for index, (acc, seq) in enumerate(return_list):
-            f.write(">" + str(index) + " accuracy: " + str(acc) + "\n" + str(seq) + "\n")
+    with open(args.outpref + "_seq.txt", "w") as f1, open(args.outpref + "_acc.txt", "w") as f2:
+        f2.write("Prop_masked\tTemperature\tIndex\Jaccard_distance\tBreakpoint_distance\n")
+        for index, (jdist, break_dist, seq) in enumerate(return_list):
+            f1.write(">" + str(index) + " jaccard_distance: " + str(jdist) + " breakpoint_distance: " + str(break_dist) + "\n" + str(seq) + "\n")
+            f2.write(str(args.prop_masked) + "\t" + str(args.temperature) + "\t" + str(index) + "\t" + str(jdist) + "\t" + str(break_dist) + "\n")
 
     if DDP_active:
         cleanup()
