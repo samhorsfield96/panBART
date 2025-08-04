@@ -70,7 +70,18 @@ def parse_args():
     parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
     parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
-    
+
+    # additional analysis flags
+    parser.add_argument('--labels', default=None, help='csv file describing genome names in first column in same order as in embeddings file. No header. Can have second column with assigned clusters.')
+    parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
+    parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
+    parser.add_argument("--query_file", type=str, required=True, help="Path to the text file containing an additional prompt for querying.")
+    parser.add_argument("--outpref", type=str, default="simulated_genomes", help="Output prefix for simulated genomes. Default = 'simulated_genomes'")
+    parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
+    parser.add_argument("--pooling", choices=['mean', 'max'], help="Pooling for embedding generation. Defaualt = 'mean'.")
+    parser.add_argument("--ignore_unknown", default=False, action="store_true", help="Ignore unknown tokens during calculations.")
+
     args = parser.parse_args()
 
     # Ensure max_seq_length is greater than or equal to attention_window

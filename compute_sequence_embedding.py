@@ -170,27 +170,21 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
     # Display the DataFrame
     df.to_csv(outpref + ".csv", index=False, header=False)
 
+    return df
+
 
 def read_prompt_file(file_path, genome_labels):
-
-    order = False
-    # ensure genomes are placed in the same order and are present
-    if len(genome_labels) > 0:
-        order = True
-
     genome_id_list = []
     prompt_list = []
     with open(file_path, 'r') as file:
         for line in file:
-            if order:
-                split_line = line.strip().split("\t")
-                genome_id_list.append(split_line[0])
-                prompt_list.append(split_line[1])
-            else:
-                prompt_list.append(line.strip())
-    
-    # determine order of genomes and reorder if required
-    if order:
+            split_line = line.strip().split("\t")
+            genome_id_list.append(split_line[0])
+            prompt_list.append(split_line[1])
+
+    # if labels provided order and return
+    if len(genome_labels) > 0:
+        # determine order of genomes and reorder
         order_list = [None] * len(genome_labels)
         for label_idx, label in enumerate(genome_labels):
             for genome_idx, genome_id in enumerate(genome_id_list):
@@ -209,7 +203,7 @@ def read_prompt_file(file_path, genome_labels):
         #print(reordered_genome_id_list)
         return reordered_prompt_list, reordered_genome_id_list
     else:
-        return prompt_list, None
+        prompt_list, genome_id_list
 
 def split_prompts(prompts, world_size):
     # Split prompts into approximately equal chunks for each GPU
