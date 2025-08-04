@@ -207,7 +207,9 @@ def load_dataset(input_file):
     """
     try:
         with open(input_file, "r") as file:
-            genomes = [genome.strip() for genome in file.readlines()]
+            #genomes = [genome.strip() for genome in file.readlines()]
+
+            genomes = [genome.strip().split("\t")[-1] for genome in file.readlines()]
             # randomise contig order
             #for index in range(len(genomes)):
             #    split_genome = genomes[index].split(" _ ")

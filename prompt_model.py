@@ -19,9 +19,29 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 logging.set_verbosity_error()
 
-def jaccard_distance(A, B):
-    set_A = set(abs(g) for g in A)
-    set_B = set(abs(g) for g in B)
+def kmerize(seq, k):
+    kmer_set = set()
+    n = len(seq)
+    
+    for i in range(n - k + 1):
+        kmer = seq[i:i + k]
+        
+        # Reverse "kmer" and transform
+        rev_kmer = tuple("_" if token == "_" else -token for token in reversed(kmer))
+        
+        # Original kmer as tuple
+        kmer_tup = tuple(kmer)
+        
+        # Lexicographical min between kmer and its reverse
+        canonical_kmer = min(kmer_tup, rev_kmer)
+        
+        kmer_set.add(canonical_kmer)
+    
+    return kmer_set
+
+def jaccard_distance(A, B, k):
+    set_A = kmerize(A, k)
+    set_B = kmerize(B, k)
     intersection = len(set_A & set_B)
     union = len(set_A | set_B)
     return 1 - intersection / union if union > 0 else 0
@@ -87,6 +107,7 @@ def parse_args():
     parser.add_argument("--max_input_len", type=int, default=None, help="Maximum length of input sequence. No limit if not set.")
     parser.add_argument("--min_input_len", type=int, default=None, help="Minimum length of input sequence. No limit if not set.")
     parser.add_argument("--num_seq", type=int, default=1, help="Number of simulations per prompt sequence. Default = 1")
+    parser.add_argument("--k_size", type=int, default=3, help="K-mer size for calculating jaccard distance between simulated and real strings. Default = 3")
     parser.add_argument("--outpref", type=str, default="simulated_genomes", help="Output file for simulated genomes. Default = 'simulated_genomes'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Prompt using encoder input only.")
@@ -123,7 +144,7 @@ def load_model(embed_dim, num_heads, num_layers, max_seq_length, device, vocab_s
     model.config.use_cache = True
     return model
 
-def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only, generate, DDP_active, prompt_list_truth):
+def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_seq, max_seq_length, encoder_only, generate, DDP_active, prompt_list_truth, k_size):
     model.eval()
 
     predictions = []
@@ -267,15 +288,15 @@ def predict_next_tokens_BART(model, tokenizer, loader, device, temperature, num_
                 sequence = tokenizer.decode(sequence, skip_special_tokens=True)
 
                 # get jaccard and breakpoint distance
-                jaccard_dist = jaccard_distance(sequence, real_seq)
-                break_dist = breakpoint_distance(sequence, real_seq)
+                jaccard_dist = jaccard_distance(sequence, real_seq, k_size)
+                #break_dist = breakpoint_distance(sequence, real_seq)
                 jaccard_accuracy_list.append(jaccard_dist)
-                breakpoint_accuracy_list.append(break_dist)
+                #breakpoint_accuracy_list.append(break_dist)
 
                 #print(sequence)
                 predictions.append(sequence)
    
-    return_list = [(jdist, breakdist, seq) for acc, seq in zip(jaccard_accuracy_list, breakpoint_accuracy_list, predictions)]
+    return_list = [(jdist, seq) for acc, seq in zip(jaccard_accuracy_list, predictions)]
 
     return return_list
 
@@ -293,7 +314,9 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked, args.global_contig_breaks, False, ID_list=list(range(0,len(prompt_list_truth))))
+    ID_list=list(range(0,len(prompt_list_truth)))
+    print(ID_list)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, args.prop_masked, args.global_contig_breaks, False, ID_list=ID_list)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
@@ -316,7 +339,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     master_process = rank == 0
 
-    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only, args.generate, DDP_active, prompt_list_truth)
+    predicted_text = predict_next_tokens_BART(model, tokenizer, loader, device, args.temperature, args.num_seq, args.max_seq_length, encoder_only, args.generate, DDP_active, prompt_list_truth, args.k_size)
     
     return_list.extend(predicted_text)
 
@@ -385,11 +408,23 @@ def main():
         prompt_list = [shuffle_genome(genome) for genone in prompt_list]
 
     prompt_list_truth = prompt_list
-    if args.prop_prompt_removed < 1.0:
-        if args.prop_prompt_removed == 0.0:
-            prompt_list = ["_" for genone in prompt_list]
-        else:
-            prompt_list = [genome[0:int(len(genome) * args.prop_prompt_removed)] for genome in prompt_list]
+    if args.prop_prompt_kept < 1.0:
+        for i in range(len(prompt_list)):
+            genome = prompt_list[i].split()
+            print(genome)
+            num_non_masked = int(round((len(genome) * args.prop_prompt_kept), 0))
+            num_masked = len(genome) - num_non_masked
+
+            print(f"num_masked: {num_masked}")
+            print(f"num_non_masked: {num_non_masked}")
+
+            # mask up to point
+            genome = genome[0:num_non_masked]
+            genome.extend(["<mask>"] * num_masked)
+
+            genome = " ".join(genome)
+            print(genome)
+            prompt_list[i] = genome
 
     return_list = []
     if DDP_active:
