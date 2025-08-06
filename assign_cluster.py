@@ -4,7 +4,7 @@ from compute_sequence_embedding import *
 from sklearn.neighbors import KNeighborsClassifier
 
 def parse_args_script():
-    parser = parse_args()
+    parser = parse_args_universal()
 
     # additional analysis flags
     parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
