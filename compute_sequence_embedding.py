@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
     parser.add_argument("--tokenizer_path", type=str, required=True, help="Path to the tokenizer file.")
     parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
-    parser.add_argument('--labels', default=None, help='csv file describing genome names in first column in same order as in embeddings file. No header. Can have second column with assigned clusters.')
+    parser.add_argument('--labels', default=None, help='csv file describing genome names in first column in same order as in embeddings file. Can have second column with assigned clusters.')
     parser.add_argument("--embed_dim", type=int, default=256, help="Embedding dimension.")
     parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
     parser.add_argument("--num_layers", type=int, default=8, help="Number of transformer layers.")
@@ -173,7 +173,7 @@ def calculate_embedding(model, tokenizer, loader, device, max_seq_length, encode
     return df
 
 
-def read_prompt_file(file_path, genome_labels):
+def read_prompt_file(file_path, genome_labels=None):
     genome_id_list = []
     prompt_list = []
     with open(file_path, 'r') as file:
@@ -183,7 +183,7 @@ def read_prompt_file(file_path, genome_labels):
             prompt_list.append(split_line[1])
 
     # if labels provided order and return
-    if len(genome_labels) > 0:
+    if genome_labels != None:
         # determine order of genomes and reorder
         order_list = [None] * len(genome_labels)
         for label_idx, label in enumerate(genome_labels):
@@ -203,7 +203,7 @@ def read_prompt_file(file_path, genome_labels):
         #print(reordered_genome_id_list)
         return reordered_prompt_list, reordered_genome_id_list
     else:
-        prompt_list, genome_id_list
+        return prompt_list, genome_id_list
 
 def split_prompts(prompts, world_size):
     # Split prompts into approximately equal chunks for each GPU
@@ -300,6 +300,7 @@ def main():
     genome_labels = []
     if args.labels != None:
         with open(args.labels, "r") as i:
+            i.readline()
             for line in i:
                 split_line = line.split(",")
                 genome_name = split_line[0]
