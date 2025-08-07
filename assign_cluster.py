@@ -77,7 +77,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
 
     # add known labels and use k-NN to generate labels for unknown
     X_train = prompt_list_df.iloc[:, 1:].values  # Features (N-dimensional embeddings)
-    y_train = np.array(query_genome_labels)   # Labels
+    y_train = np.array(cluster_assignments)   # Labels
 
     # Train the classifier
     knn = KNeighborsClassifier(n_neighbors=args.n_neighbors)
@@ -87,7 +87,10 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     X_test = query_list_df.iloc[:, 1:].values
     y_pred = knn.predict(X_test)
 
-    query_list_df['predicted_label'] = y_pred
+    query_list_df_pred = pd.DataFrame(columns=['Taxon', 'predicted_label'])
+    query_list_df_pred['Taxon'] = query_list_df.iloc[:, 0].values
+    query_list_df_pred['predicted_label'] = y_pred
+    query_list_df_pred.to_csv(args.outpref + "_predictions.tsv", sep='\t', index=False)
 
     if args.query_labels != None:
         # parse real data labels
@@ -175,7 +178,7 @@ def main():
     with open(args.prompt_labels, "r") as i:
         i.readline()
         for line in i:
-            split_line = line.split(",")
+            split_line = line.rstrip().split(",")
             genome_name = split_line[0]
             genome_labels.append(genome_name)
             cluster_assignments.append(split_line[1])
