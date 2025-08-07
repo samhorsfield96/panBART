@@ -171,6 +171,7 @@ def main():
     genome_labels = []
     cluster_assignments = []
     with open(args.prompt_labels, "r") as i:
+        i.readline()
         for line in i:
             split_line = line.split(",")
             genome_name = split_line[0]
@@ -179,7 +180,7 @@ def main():
 
     # parse prompt file and additional query files for assignment to clusters
     prompt_list, genome_labels = read_prompt_file(args.prompt_file, genome_labels)
-    query_prompt_list, query_genome_labels = read_prompt_file(args.prompt_file, [])
+    query_prompt_list, query_genome_labels = read_prompt_file(args.query_file)
 
     # randomise
     if args.randomise:
