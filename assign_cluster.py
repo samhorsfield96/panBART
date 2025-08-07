@@ -2,6 +2,7 @@ from parse_args import *
 
 from compute_sequence_embedding import *
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
 
 def parse_args_script():
     parser = parse_args_universal()
@@ -65,14 +66,14 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
-    prompt_list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref, args.pooling)
+    prompt_list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref + "_prompt", args.pooling)
 
     # query model with unknown prompts
     dataset = GenomeDataset(query_prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, query_genome_labels, args.ignore_unknown)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
-    query_list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref, args.pooling)
+    query_list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref + "_query", args.pooling)
 
     # add known labels and use k-NN to generate labels for unknown
     X_train = prompt_list_df.iloc[:, 1:].values  # Features (N-dimensional embeddings)
@@ -92,8 +93,9 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         # parse real data labels
         query_cluster_assignments = []
         with open(args.query_labels, "r") as i:
+            i.readline()
             for line in i:
-                split_line = line.split(",")
+                split_line = line.rstrip().split(",")
                 query_cluster_assignments.append(split_line[1])
         y_test = np.array(query_cluster_assignments)
         unique_labels = np.unique(y_test)

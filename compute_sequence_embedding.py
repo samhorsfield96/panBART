@@ -190,14 +190,14 @@ def read_prompt_file(file_path, genome_labels=None):
             for genome_idx, genome_id in enumerate(genome_id_list):
                 if has_exact_match(genome_id, label):
                     #print(f"Match: {genome_id} {label}")
-                    order_list[label_idx] = (genome_idx, label)
+                    order_list[label_idx] = (genome_idx, label, genome_id)
                     break
         
         reordered_prompt_list = []
         reordered_genome_id_list = []
-        for genome_idx, label in order_list:
+        for genome_idx, label, genome_id in order_list:
             reordered_prompt_list.append(prompt_list[genome_idx])
-            reordered_genome_id_list.append(label)
+            reordered_genome_id_list.append(genome_id)
         #print(order_list)
         #print(genome_id_list)
         #print(reordered_genome_id_list)
