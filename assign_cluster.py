@@ -8,17 +8,19 @@ def parse_args_script():
     parser = parse_args_universal()
 
     # additional analysis flags
-    parser.add_argument("--prompt_file", type=str, required=True, help="Path to the text file containing the prompt.")
+    parser.add_argument("--prompt_file", type=str, required=False, default=None, help="Path to the text file containing the prompt.")
     parser.add_argument('--prompt_labels', required=True, help='csv file describing prompt_file genome names in first column. No header. Can have second column with assigned clusters.')
     parser.add_argument("--randomise", default=False, action="store_true", help="Randomise sequence for upon input.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint file.")
-    parser.add_argument("--query_file", type=str, required=True, help="Path to the text file containing an additional prompt for querying.")
+    parser.add_argument("--query_file", type=str, required=False, default=None, help="Path to the text file containing an additional prompt for querying.")
     parser.add_argument("--query_labels", type=str, default=None, required=False, help="csv file describing query_file genome names in first column. No header. Can have second column with assigned clusters.")
     parser.add_argument("--outpref", type=str, default="simulated_genomes", help="Output prefix for simulated genomes. Default = 'simulated_genomes'")
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--pooling", choices=['mean', 'max'], help="Pooling for embedding generation. Defaualt = 'mean'.")
     parser.add_argument("--ignore_unknown", default=False, action="store_true", help="Ignore unknown tokens during calculations.")
     parser.add_argument("--n_neighbors", default=5, type=int, help="Number of neighbors for KNN classification.")
+    parser.add_argument("--prompt_embeddings", default=None, type=str, help="Previously computed prompt embeddings.")
+    parser.add_argument("--query_embeddings", default=None, type=str, help="Previously computed query embeddings.")
 
     args = parser.parse_args()
 
@@ -27,13 +29,31 @@ def parse_args_script():
     # Round down max_seq_length to the nearest multiple of attention_window
     args.max_seq_length = (args.max_seq_length // args.attention_window) * args.attention_window
 
+    if args.prompt_file == None and args.prompt_embeddings == None:
+        print("One of --prompt_file and --prompt_embeddings required")
+        sys.exit(1)
+    
+    if args.query_file == None and args.query_embeddings == None:
+        print("One of --query_file and --query_embeddings required")
+        sys.exit(1)
+
     return args
+
+# wrapper to get embeddings from model querying
+def get_embeddings(input_list, tokenizer, model, labels, shuffle, num_workers, pin_memory, sampler, device, encoder_only, outsuf, args):
+    # query model with known prompts
+    dataset = GenomeDataset(input_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, labels, args.ignore_unknown)
+    dataset.attention_window = args.attention_window
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
+    
+    list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref + outsuf, args.pooling)
+
+    return list_df
 
 def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, genome_labels, cluster_assignments, DDP_active, encoder_only, query_prompt_list, query_genome_labels):
     if DDP_active:
         setup(rank, world_size, args.port)
         #prompt_list = prompt_list[rank]
-        sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
         num_workers = 0
         pin_memory = False
         shuffle = False
@@ -61,20 +81,23 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         checkpoint = torch.load(model_path)
     model.load_state_dict(checkpoint["model_state_dict"])
     
-    # query model with known prompts
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, genome_labels, args.ignore_unknown)
-    dataset.attention_window = args.attention_window
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
+    # generate both sets of embeddings
+    if args.prompt_embeddings == None:
+        # reset sampler
+        if DDP_active:
+            sampler = DistributedSampler(prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
+        prompt_list_df = get_embeddings(prompt_list, tokenizer, model, genome_labels, shuffle, num_workers, pin_memory, sampler, device, encoder_only, "_prompt", args)
+    else:
+        prompt_list_df = pd.read_csv(args.prompt_embeddings, header=None, index_col=False)
     
-    prompt_list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref + "_prompt", args.pooling)
-
-    # query model with unknown prompts
-    dataset = GenomeDataset(query_prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, query_genome_labels, args.ignore_unknown)
-    dataset.attention_window = args.attention_window
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
+    if args.query_embeddings == None:
+        # reset sampler
+        if DDP_active:
+            sampler = DistributedSampler(query_prompt_list, num_replicas=world_size, rank=rank, shuffle=False)
+        query_list_df = get_embeddings(query_prompt_list, tokenizer, model, query_genome_labels, shuffle, num_workers, pin_memory, sampler, device, encoder_only, "_query", args)
+    else:
+        query_list_df = pd.read_csv(args.query_embeddings, header=None, index_col=False)
     
-    query_list_df = calculate_embedding(model, tokenizer, loader, device, args.max_seq_length, encoder_only, args.outpref + "_query", args.pooling)
-
     # add known labels and use k-NN to generate labels for unknown
     X_train = prompt_list_df.iloc[:, 1:].values  # Features (N-dimensional embeddings)
     y_train = np.array(cluster_assignments)   # Labels
