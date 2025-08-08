@@ -273,7 +273,21 @@ def main():
 
     # parse prompt file and additional query files for assignment to clusters
     prompt_list, genome_labels = read_prompt_file(args.prompt_file, genome_labels)
-    query_prompt_list, query_genome_labels = read_prompt_file(args.query_file)
+
+    # need to reorder queries if labels present
+    if args.query_labels != None:
+        
+        query_genome_labels = []
+        with open(args.query_labels, "r") as i:
+            i.readline()
+            for line in i:
+                split_line = line.rstrip().split(",")
+                genome_name = split_line[0]
+                query_genome_labels.append(genome_name)
+
+        query_prompt_list, query_genome_labels = read_prompt_file(args.query_file, query_genome_labels)
+    else:
+        query_prompt_list, query_genome_labels = read_prompt_file(args.query_file)
 
     # randomise
     if args.randomise:
