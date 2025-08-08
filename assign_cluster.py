@@ -2,7 +2,7 @@ from parse_args import *
 
 from compute_sequence_embedding import *
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import accuracy_score, balanced_accuracy_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, precision_score, recall_score
 
 def parse_args_script():
     parser = parse_args_universal()
@@ -105,6 +105,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     # Train the classifier
     # train for different values of k
     n_neighbors_list = [int(k) for k in args.n_neighbors.split(",")]
+    per_k_accuracy = []
     for n_neighbors in n_neighbors_list:
         try:
             knn = KNeighborsClassifier(n_neighbors=n_neighbors)
@@ -137,8 +138,14 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
                     y_test_label_count = np.sum(idx)
                     y_train_label_count = np.sum(y_train == label)
                     label_acc = accuracy_score(y_test[idx], y_pred[idx])
+                    label_precision = precision_score(y_test, y_pred, labels=[label], average='macro', zero_division=0)
+                    label_recall = recall_score(y_test, y_pred, labels=[label], average='macro', zero_division=0)
+
                     per_label_accuracy.append({
+                        'K': n_neighbors,
                         'Label': label,
+                        'Precision': label_precision,
+                        'Recall': label_recall,
                         'Accuracy': label_acc,
                         'Query_count' : y_test_label_count,
                         'Test_count': y_train_label_count
@@ -147,23 +154,65 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
                 # Overall accuracy
                 all_acc = accuracy_score(y_test, y_pred)
                 all_acc_balanced = balanced_accuracy_score(y_test, y_pred)
+                overall_precision_macro = precision_score(y_test, y_pred, average='macro', zero_division=0)
+                overall_recall_macro = recall_score(y_test, y_pred, average='macro', zero_division=0)
+                overall_precision_weighted = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+                overall_recall_weighted = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+
                 per_label_accuracy.append({
-                        'Label': "overall",
-                        'Accuracy': all_acc
+                    'K': n_neighbors,
+                    'Label': "overall",
+                    'Accuracy': all_acc,
+                    'Precision': overall_precision_macro,
+                    'Recall': overall_recall_macro,
+                    'Query_count' : len(query_cluster_assignments),
+                    'Test_count': len(cluster_assignments)
                     })
                 per_label_accuracy.append({
-                        'Label': "overall_balanced",
-                        'Accuracy': all_acc_balanced
+                    'K': n_neighbors,
+                    'Label': "overall_balanced",
+                    'Accuracy': all_acc_balanced,
+                    'Precision': overall_precision_weighted,
+                    'Recall': overall_recall_weighted,
+                    'Query_count' : len(query_cluster_assignments),
+                    'Test_count': len(cluster_assignments)
                     })
+                
+                # save to overall dataframe:
+                per_k_accuracy.append({
+                    'K': n_neighbors,
+                    'Label': "overall",
+                    'Accuracy': all_acc,
+                    'Precision': overall_precision_macro,
+                    'Recall': overall_recall_macro,
+                    'Query_count' : len(query_cluster_assignments),
+                    'Test_count': len(cluster_assignments)
+                })
+                per_k_accuracy.append({
+                    'K': n_neighbors,
+                    'Label': "overall_balanced",
+                    'Accuracy': all_acc_balanced,
+                    'Precision': overall_precision_weighted,
+                    'Recall': overall_recall_weighted,
+                    'Query_count' : len(query_cluster_assignments),
+                    'Test_count': len(cluster_assignments)
+                })
 
                 # Convert to DataFrame
                 per_label_df = pd.DataFrame(per_label_accuracy)
 
                 # Save to TSV
                 per_label_df.to_csv(args.outpref + f"k_{n_neighbors}_per_label_accuracy.tsv", sep='\t', index=False)
-        except:
+        except Exception as error:
             print(f"Failed to train at K={n_neighbors}")
+            print("Error here:", error)
             continue
+    
+    # Convert to DataFrame
+    per_k_df = pd.DataFrame(per_k_accuracy)
+
+    # Save to TSV
+    per_k_df.to_csv(args.outpref + "_overall_accuracy.tsv", sep='\t', index=False)
 
 def main():
     args = parse_args_script()
