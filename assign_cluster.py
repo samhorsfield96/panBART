@@ -2,7 +2,7 @@ from parse_args import *
 
 from compute_sequence_embedding import *
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score
 
 def parse_args_script():
     parser = parse_args_universal()
@@ -18,7 +18,7 @@ def parse_args_script():
     parser.add_argument("--DDP", action="store_true", default=False, help="Multiple GPUs used via DDP during training.")
     parser.add_argument("--pooling", choices=['mean', 'max'], help="Pooling for embedding generation. Defaualt = 'mean'.")
     parser.add_argument("--ignore_unknown", default=False, action="store_true", help="Ignore unknown tokens during calculations.")
-    parser.add_argument("--n_neighbors", default=5, type=int, help="Number of neighbors for KNN classification.")
+    parser.add_argument("--n_neighbors", default="5", help="Number of neighbors for KNN classification.")
     parser.add_argument("--prompt_embeddings", default=None, type=str, help="Previously computed prompt embeddings.")
     parser.add_argument("--query_embeddings", default=None, type=str, help="Previously computed query embeddings.")
 
@@ -146,9 +146,14 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
                 
                 # Overall accuracy
                 all_acc = accuracy_score(y_test, y_pred)
+                all_acc_balanced = balanced_accuracy_score(y_test, y_pred)
                 per_label_accuracy.append({
                         'Label': "overall",
                         'Accuracy': all_acc
+                    })
+                per_label_accuracy.append({
+                        'Label': "overall_balanced",
+                        'Accuracy': all_acc_balanced
                     })
 
                 # Convert to DataFrame
