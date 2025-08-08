@@ -103,51 +103,62 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
     y_train = np.array(cluster_assignments)   # Labels
 
     # Train the classifier
-    knn = KNeighborsClassifier(n_neighbors=args.n_neighbors)
-    knn.fit(X_train, y_train)
+    # train for different values of k
+    n_neighbors_list = [int(k) for k in args.n_neighbors.split(",")]
+    for n_neighbors in n_neighbors_list:
+        try:
+            knn = KNeighborsClassifier(n_neighbors=n_neighbors)
+            knn.fit(X_train, y_train)
 
-    # predict from classifier
-    X_test = query_list_df.iloc[:, 1:].values
-    y_pred = knn.predict(X_test)
+            # predict from classifier
+            X_test = query_list_df.iloc[:, 1:].values
+            y_pred = knn.predict(X_test)
 
-    query_list_df_pred = pd.DataFrame(columns=['Taxon', 'predicted_label'])
-    query_list_df_pred['Taxon'] = query_list_df.iloc[:, 0].values
-    query_list_df_pred['predicted_label'] = y_pred
-    query_list_df_pred.to_csv(args.outpref + "_predictions.tsv", sep='\t', index=False)
+            query_list_df_pred = pd.DataFrame(columns=['Taxon', 'predicted_label'])
+            query_list_df_pred['Taxon'] = query_list_df.iloc[:, 0].values
+            query_list_df_pred['predicted_label'] = y_pred
+            query_list_df_pred.to_csv(args.outpref + f"_k_{n_neighbors}_predictions.tsv", sep='\t', index=False)
 
-    if args.query_labels != None:
-        # parse real data labels
-        query_cluster_assignments = []
-        with open(args.query_labels, "r") as i:
-            i.readline()
-            for line in i:
-                split_line = line.rstrip().split(",")
-                query_cluster_assignments.append(split_line[1])
-        y_test = np.array(query_cluster_assignments)
-        unique_labels = np.unique(y_test)
-        # Per-class accuracy
-        per_label_accuracy = []
-        for label in unique_labels:
-            # Select only test examples of this class
-            idx = y_test == label
-            label_acc = accuracy_score(y_test[idx], y_pred[idx])
-            per_label_accuracy.append({
-                'Label': label,
-                'Accuracy': label_acc
-            })
-        
-        # Overall accuracy
-        all_acc = accuracy_score(y_test, y_pred)
-        per_label_accuracy.append({
-                'Label': "overall",
-                'Accuracy': all_acc
-            })
+            if args.query_labels != None:
+                # parse real data labels
+                query_cluster_assignments = []
+                with open(args.query_labels, "r") as i:
+                    i.readline()
+                    for line in i:
+                        split_line = line.rstrip().split(",")
+                        query_cluster_assignments.append(split_line[1])
+                y_test = np.array(query_cluster_assignments)
+                unique_labels = np.unique(y_test)
+                # Per-class accuracy
+                per_label_accuracy = []
+                for label in unique_labels:
+                    # Select only test examples of this class
+                    idx = y_test == label
+                    y_test_label_count = np.sum(idx)
+                    y_train_label_count = np.sum(y_train == label)
+                    label_acc = accuracy_score(y_test[idx], y_pred[idx])
+                    per_label_accuracy.append({
+                        'Label': label,
+                        'Accuracy': label_acc,
+                        'Query_count' : y_test_label_count,
+                        'Test_count': y_train_label_count
+                    })
+                
+                # Overall accuracy
+                all_acc = accuracy_score(y_test, y_pred)
+                per_label_accuracy.append({
+                        'Label': "overall",
+                        'Accuracy': all_acc
+                    })
 
-        # Convert to DataFrame
-        per_label_df = pd.DataFrame(per_label_accuracy)
+                # Convert to DataFrame
+                per_label_df = pd.DataFrame(per_label_accuracy)
 
-        # Save to TSV
-        per_label_df.to_csv(args.outpref + "_per_label_accuracy.tsv", sep='\t', index=False)
+                # Save to TSV
+                per_label_df.to_csv(args.outpref + f"k_{n_neighbors}_per_label_accuracy.tsv", sep='\t', index=False)
+        except:
+            print(f"Failed to train at K={n_neighbors}")
+            continue
 
 def main():
     args = parse_args_script()
