@@ -202,7 +202,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
                 per_label_df = pd.DataFrame(per_label_accuracy)
 
                 # Save to TSV
-                per_label_df.to_csv(args.outpref + f"k_{n_neighbors}_per_label_accuracy.tsv", sep='\t', index=False)
+                per_label_df.to_csv(args.outpref + f"_k_{n_neighbors}_per_label_accuracy.tsv", sep='\t', index=False)
         except Exception as error:
             print(f"Failed to train at K={n_neighbors}")
             print("Error here:", error)
