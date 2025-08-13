@@ -79,7 +79,7 @@ def test_model(world_size, args, BARTlongformer_config, test_genomes, tokenizer,
         cleanup()
 
 def main():
-    args = parse_args_universal()
+    args = parse_args_universal().parse_args()
 
     params = vars(args)  # Convert the parsed arguments to a dictionary
 
