@@ -138,6 +138,7 @@ def parse_args():
     parser.add_argument("--encoder_only", default=False, action="store_true", help="Train using encoder input only.")
     parser.add_argument("--save_test_data", default=False, action="store_true", help="Print the genomes used for testing as held-out sequences.")
     parser.add_argument("--global_contig_breaks", default=False, action="store_true", help="Attend globally to contig breaks. Default is local only.")
+    parser.add_argument("--ignore_unknown", default=False, action="store_true", help="Ignore unknown tokens during calculations.")
     parser.add_argument("--port", default="12356", type=str, help="GPU port for DDP. Default=12356")
     
     args = parser.parse_args()
