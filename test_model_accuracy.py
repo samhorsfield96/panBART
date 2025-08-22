@@ -1,6 +1,4 @@
-from parse_args import *
-from panGPT import validate_model
-import logging
+from panGPT import *
 
 logging.basicConfig(
     level=logging.INFO,
@@ -10,7 +8,10 @@ logging.basicConfig(
     ],
 )
 
-def test_model(world_size, args, BARTlongformer_config, test_genomes, tokenizer, vocab_size, DDP_active=False):
+def test_model(rank, world_size, args, BARTlongformer_config, test_genomes, tokenizer, vocab_size, DDP_active=False):
+    if DDP_active:
+        setup(rank, world_size, args.port)
+    
     # determine number of GPUs to use
     #num_gpus = torch.cuda.device_count()
     model = LEDForConditionalGeneration(BARTlongformer_config)
@@ -35,13 +36,17 @@ def test_model(world_size, args, BARTlongformer_config, test_genomes, tokenizer,
     if DDP_active:
         map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
         dist.barrier()
-    start_epoch, is_checkpoint_loaded = load_checkpoint(model, _, _, args.model_save_path, False, map_location)
+
+    # load model
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate * math.sqrt(world_size), weight_decay=args.weight_decay) # How are we trying to optimizer it?
+    lr_scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=args.lr_scheduler_factor, patience=args.lr_patience) # taking big, then small steps
+    start_epoch, is_checkpoint_loaded = load_checkpoint(model, optimizer, lr_scheduler, args.model_save_path, False, map_location)
 
     # get loss object
     criterion = torch.nn.CrossEntropyLoss().to(device)
-    
+
     # generate genome datasets
-    test_dataset = GenomeDataset(test_genomes, tokenizer, args.max_seq_length, 0, args.global_contig_breaks)
+    test_dataset = GenomeDataset(test_genomes, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, ignore_unknown=args.ignore_unknown)
     test_dataset.attention_window = args.attention_window
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=pin_memory, sampler=test_sampler)
     #test_loader.sampler.set_epoch(epoch)
@@ -79,7 +84,7 @@ def test_model(world_size, args, BARTlongformer_config, test_genomes, tokenizer,
         cleanup()
 
 def main():
-    args = parse_args_universal().parse_args()
+    args = parse_args()
 
     params = vars(args)  # Convert the parsed arguments to a dictionary
 
@@ -94,6 +99,7 @@ def main():
     seed = args.seed
     max_input_len = args.max_input_len
     min_input_len = args.min_input_len
+    model_dropout_rate = args.model_dropout_rate
 
     # Check if max_seq_length is a multiple of attention_window when using Longformer
     #if (model_type == "longformer" or model_type == "BARTlongformer") and max_seq_length % attention_window != 0:
