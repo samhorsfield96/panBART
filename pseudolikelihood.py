@@ -122,6 +122,15 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
         # repeat for number of sequences required. Means each sequences is masked in different ways
         for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask, genome_id in loader:  # Correctly unpack the tuples returned by the DataLoader
 
+            # print(f"decoder_input:\n:{decoder_input.tolist()}")
+            # print(f"encoder_input:\n:{encoder_input.tolist()}")
+
+            # unk_count_encoder = torch.sum(encoder_input == unk_token).item()
+            # unk_count_decoder = torch.sum(decoder_input == unk_token).item()
+
+            # print(f"UNK count in encoder: {unk_count_encoder}")
+            # print(f"UNK count in decoder: {unk_count_decoder}")
+            
             total_len = encoder_input.size(1)
             log_pseudo_likelihood = []
             for i in range(0, total_len, max_seq_length):
@@ -214,7 +223,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
             lq_log_pseudo_likelihood = quartiles[0]
             uq_log_pseudo_likelihood = quartiles[2]
 
-            log_pseudo_likelihood_list.append((genome_id, min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood))
+            log_pseudo_likelihood_list.append((genome_id[0], min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood))
 
     return log_pseudo_likelihood_list, gene_dict
 
