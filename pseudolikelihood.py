@@ -120,7 +120,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
     gene_dict = defaultdict(list)
     with torch.no_grad():
         # repeat for number of sequences required. Means each sequences is masked in different ways
-        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask in loader:  # Correctly unpack the tuples returned by the DataLoader
+        for decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask, genome_id in loader:  # Correctly unpack the tuples returned by the DataLoader
 
             total_len = encoder_input.size(1)
             log_pseudo_likelihood = []
@@ -214,7 +214,7 @@ def calculate_pseudolikelihood(model, tokenizer, loader, device, max_seq_length,
             lq_log_pseudo_likelihood = quartiles[0]
             uq_log_pseudo_likelihood = quartiles[2]
 
-            log_pseudo_likelihood_list.append((min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood))
+            log_pseudo_likelihood_list.append((genome_id, min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood))
 
     return log_pseudo_likelihood_list, gene_dict
 
@@ -230,7 +230,7 @@ def split_prompts(prompts, world_size):
     chunk_size = len(prompts) // world_size
     return [prompts[i * chunk_size:(i + 1) * chunk_size] for i in range(world_size)]
 
-def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, encoder_only, return_list, gene_list):
+def query_model(rank, model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, genome_ids, DDP_active, encoder_only, return_list, gene_list):
     if DDP_active:
         setup(rank, world_size, args.port)
         #prompt_list = prompt_list[rank]
@@ -244,7 +244,7 @@ def query_model(rank, model_path, world_size, args, BARTlongformer_config, token
         shuffle = False
         num_workers=1
     
-    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, None, args.ignore_unknown)
+    dataset = GenomeDataset(prompt_list, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False, genome_ids, args.ignore_unknown)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=pin_memory, sampler=sampler)
     
@@ -320,7 +320,7 @@ def main():
         else:
             device = torch.device("cpu")
 
-    prompt_list = load_dataset(args.prompt_file)
+    prompt_list, genome_ids = load_dataset(args.prompt_file, return_ids=True)
 
     # randomise
     if args.randomise:
@@ -331,33 +331,32 @@ def main():
 
     # remove sequences that are too long or short
     if args.max_input_len != None:
-        # len_list = [len(genome.split()) for genome in prompt_list]
-        # print(len_list)
-        prompt_list = [genome for genome in prompt_list if len(genome.split()) <= args.max_input_len]
+        prompt_idx = [idx for idx, genome in enumerate(prompt_list) if len(genome.split()) <= args.max_input_len]
+        prompt_list = [prompt_list[idx] for idx in prompt_idx]
+        genome_ids = [genome_ids[idx] for idx in prompt_idx]
 
     if args.min_input_len != None:
-        # len_list = [len(genome.split()) for genome in prompt_list]
-        # print(len_list)
-        prompt_list = [genome for genome in prompt_list if len(genome.split()) >= args.min_input_len]
+        prompt_idx = [idx for idx, genome in enumerate(prompt_list) if len(genome.split()) >= args.min_input_len]
+        prompt_list = [prompt_list[idx] for idx in prompt_idx]
+        genome_ids = [genome_ids[idx] for idx in prompt_idx]
 
     return_list = []
     gene_list = None
     if args.per_gene:
         gene_list = []
     if DDP_active:
-        #prompt_list = split_prompts(prompt_list, world_size)
         with Manager() as manager:
             mp_list = manager.list()
             gene_mp_list = manager.list()
             mp.spawn(query_model,
-                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, mp_list, gene_mp_list),
+                    args=(args.model_path, world_size, args, BARTlongformer_config, tokenizer, prompt_list, genome_ids, DDP_active, args.encoder_only, mp_list, gene_mp_list),
                     nprocs=world_size,
                     join=True)
             return_list = list(mp_list)
             if args.per_gene:
                 gene_list = list(gene_mp_list)
     else:
-        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, DDP_active, args.encoder_only, return_list, gene_list)
+        query_model(device, args.model_path, 1, args, BARTlongformer_config, tokenizer, prompt_list, genome_ids, DDP_active, args.encoder_only, return_list, gene_list)
     
     # unpack gene_list
     if args.per_gene:
@@ -378,10 +377,10 @@ def main():
                     f.write("{}\t{}\n".format(key, value)) 
 
     with open(args.outpref + "_pseudolikelihood.txt", "w") as f:
-        f.write("Index\tmin\tmax\tsum\tmean\tstddev\tlq\tmedian\tuq\n")
+        f.write("Genome_id\tmin\tmax\tsum\tmean\tstddev\tlq\tmedian\tuq\n")
         for index, entry in enumerate(return_list):
-            min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood = entry
-            f.write(f"{str(index)}\t{str(min_log_pseudo_likelihood)}\t{str(max_log_pseudo_likelihood)}\t{str(sum_log_pseudo_likelihood)}\t{str(mean_log_pseudo_likelihood)}\t{str(std_log_pseudo_likelihood)}\t{str(lq_log_pseudo_likelihood)}\t{str(median_log_pseudo_likelihood)}\t{str(uq_log_pseudo_likelihood)}\n")
+            genome_id, min_log_pseudo_likelihood, max_log_pseudo_likelihood, sum_log_pseudo_likelihood, mean_log_pseudo_likelihood, std_log_pseudo_likelihood, lq_log_pseudo_likelihood, median_log_pseudo_likelihood, uq_log_pseudo_likelihood = entry
+            f.write(f"{str(genome_id)}\t{str(min_log_pseudo_likelihood)}\t{str(max_log_pseudo_likelihood)}\t{str(sum_log_pseudo_likelihood)}\t{str(mean_log_pseudo_likelihood)}\t{str(std_log_pseudo_likelihood)}\t{str(lq_log_pseudo_likelihood)}\t{str(median_log_pseudo_likelihood)}\t{str(uq_log_pseudo_likelihood)}\n")
 
     if DDP_active:
         cleanup()

@@ -193,7 +193,7 @@ def print_parameters_table(params: dict) -> None:
     except Exception as e:
         logging.error(f"Failed to log parameters: {e}")
 
-def load_dataset(input_file):
+def load_dataset(input_file, return_ids=False):
     """
     Load the dataset from the input file.
 
@@ -210,14 +210,14 @@ def load_dataset(input_file):
         with open(input_file, "r") as file:
             #genomes = [genome.strip() for genome in file.readlines()]
 
-            genomes = [genome.strip().split("\t")[-1] for genome in file.readlines()]
-            # randomise contig order
-            #for index in range(len(genomes)):
-            #    split_genome = genomes[index].split(" _ ")
-            #    random.shuffle(split_genome)
-            #    genome = "_ " + " _ ".join(split_genome) + " _"
-            #    genomes[index] = genome
-        return genomes
+            if return_ids:
+                genomes_tuple = [(genome.strip().split("\t")[-1], genome.strip().split("\t")[0]) for genome in file.readlines()]
+                genomes = [x[0] for x in genomes_tuple]
+                genome_ids = [x[1] for x in genomes_tuple]
+                return genomes, genome_ids
+            else:
+                genomes = [genome.strip().split("\t")[-1] for genome in file.readlines()]
+                return genomes
     except FileNotFoundError:
         print(f"Error: The input file '{input_file}' was not found.")
         exit(1)
