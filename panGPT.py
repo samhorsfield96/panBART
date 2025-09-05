@@ -582,17 +582,14 @@ class GenomeDataset(torch.utils.data.Dataset):
 
         # do not attend to unk tokens
         if self.ignore_unknown:
-            unk_idx = np.flatnonzero(np.array(encoder_input) == int(self.unk_token))
-            encoder_attention_mask[unk_idx] = 0
-
-            unk_idx = np.flatnonzero(np.array(decoder_input) == int(self.unk_token))
-            decoder_attention_mask[unk_idx] = 0
+            encoder_attention_mask = encoder_attention_mask * (encoder_input != self.unk_token)
+            decoder_attention_mask = decoder_attention_mask * (decoder_input != self.unk_token)
 
         # attend to all contig breaks
         global_attention_mask = torch.zeros(len(encoder_input), dtype=torch.long)
         if self.global_contig_breaks:
-            break_idx = np.flatnonzero(np.array(encoder_input) == int(self.tokenizer.encode("_").ids[0]))
-            global_attention_mask[break_idx] = 1
+            contig_break_token = self.tokenizer.encode("_").ids[0]
+            global_attention_mask[encoder_input == contig_break_token] = 1
 
         # print("labels")
         # print(len(labels))
