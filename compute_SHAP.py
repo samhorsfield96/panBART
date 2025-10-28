@@ -12,15 +12,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from multiprocessing import Manager
 import torch.multiprocessing as mp
-from panGPT import setup, cleanup
+from panGPT import setup, cleanup, GenomeDataset
 import random
 from torch.utils.data import DataLoader, DistributedSampler
 from functools import partial
 import shap
 import scipy as sp
-from panPrompt import mask_integers
 import pandas as pd
-from panGPT import GenomeDataset
 
 logging.set_verbosity_error()
 
