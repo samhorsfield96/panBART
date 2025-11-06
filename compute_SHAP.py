@@ -104,25 +104,28 @@ def f(x, model, device, tokenizer, max_seq_length, pos, args, encoder_only=False
     dataset = GenomeDataset(x, tokenizer, args.max_seq_length, 0, args.global_contig_breaks, False)
     dataset.attention_window = args.attention_window
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=1, pin_memory=False, sampler=None)
-    for _x in loader:
-        #print(f"_x: {_x}")
-        decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask = _x
-        #print(f"encoder_input: {encoder_input}")
-        #print(pos)
-        if encoder_only:
-            batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
-            output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask, output_hidden_states=True)  # Generate predictions
-            encoder_hidden_states = output.encoder_last_hidden_state
-            encoder_logits = model.module.lm_head(encoder_hidden_states) + model.module.final_logits_bias
-            encoder_logits = encoder_logits.detach().cpu().numpy()
-            outputs.append(encoder_logits[0][pos])
-        else:
-            batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
-            output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
-        
-            #print(output)
-            #decoder shifted one to right, so adjust accordingly
-            outputs.append(output[0][pos - 1])
+    with torch.no_grad():
+        for _x in loader:
+            #print(f"_x: {_x}")
+            decoder_input, encoder_input, labels, decoder_attention_mask, encoder_attention_mask, global_attention_mask = _x
+            #print(f"encoder_input: {encoder_input}")
+            #print(pos)
+            if encoder_only:
+                batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+                output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask, output_hidden_states=True)  # Generate predictions
+                encoder_hidden_states = output.encoder_last_hidden_state
+                encoder_logits = model.module.lm_head(encoder_hidden_states) + model.module.final_logits_bias
+                encoder_logits = encoder_logits.detach().cpu().numpy()
+                outputs.append(encoder_logits[0][pos])
+            else:
+                batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
+                output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
+            
+                #print(output)
+                #decoder shifted one to right, so adjust accordingly
+                outputs.append(output[0][pos - 1])
+            
+    torch.cuda.empty_cache()
 
     # save all scores in same output
     #outputs = output[0]
