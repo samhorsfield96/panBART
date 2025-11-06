@@ -111,9 +111,13 @@ def f(x, model, device, tokenizer, max_seq_length, pos, args, encoder_only=False
         #print(pos)
         if encoder_only:
             batch_encoder_input, batch_encoder_attention_mask, batch_global_attention_mask = encoder_input[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
-            output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
-            #encoder same input so do not adjust
-            outputs.append(output[0][pos])
+            encoder_outputs = model.model.encoder(
+                input_ids=batch_encoder_input,
+                attention_mask=batch_encoder_attention_mask,
+                global_attention_mask=batch_global_attention_mask,
+            )
+            encoder_hidden_states = encoder_outputs.last_hidden_state.detach().cpu().numpy()
+            outputs.append(encoder_hidden_states[0][pos])
         else:
             batch_decoder_input, batch_encoder_input, batch_decoder_attention_mask, batch_encoder_attention_mask, batch_global_attention_mask = decoder_input[:, 0:max_seq_length].to(device), encoder_input[:, 0:max_seq_length].to(device), decoder_attention_mask[:, 0:max_seq_length].to(device), encoder_attention_mask[:, 0:max_seq_length].to(device), global_attention_mask[:, 0:max_seq_length].to(device)
             output = model(input_ids=batch_encoder_input, attention_mask=batch_encoder_attention_mask, decoder_input_ids=batch_decoder_input, decoder_attention_mask=batch_decoder_attention_mask, global_attention_mask=batch_global_attention_mask).logits.detach().cpu().numpy()
