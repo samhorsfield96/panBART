@@ -113,7 +113,8 @@ def main():
             i.readline()
             for line in i:
                 split_line = line.rstrip().split(",")
-                genome_name = split_line[0]
+                # remove extension
+                genome_name = split_line[0].split(".")[0]
                 genome_labels.append(genome_name)
                 cluster_assignments.append(split_line[1])
 
