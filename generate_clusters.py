@@ -70,9 +70,9 @@ def leiden_clustering(X_train, n_neighbors_list, leiden_resolution_list, genome_
                 ari = adjusted_rand_score(true_labels, leiden_labels)
                 ami = adjusted_mutual_info_score(true_labels, leiden_labels)
                 
-                best_ARI = best_params["ARI"]
+                best_AMI = best_params["AMI"]
 
-                if ari > best_ARI:
+                if ami > best_AMI:
                     best_params = {"K": n_neighbors, "resolution": leiden_resolution, "ARI": ari, "AMI": ami}
 
                 per_iteration_accuracy.append({
