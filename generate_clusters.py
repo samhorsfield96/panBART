@@ -25,22 +25,9 @@ def parse_args_script():
 
     return args
 
-def query_model(args, prompt_list, genome_labels, cluster_assignments):
-    
-    print("Reading embeddings...")
-    prompt_list_df = pd.read_csv(args.prompt_embeddings, header=None, index_col=False)
-    
-    print("Generating training data...")
-    # add known labels and use k-NN to generate labels for unknown
-    X_train = prompt_list_df.iloc[:, 1:].values  # Features (N-dimensional embeddings)
-    y_train = np.array(cluster_assignments)   # Labels
-
-    X_train = normalize(X_train)
-
-    n_neighbors_list = [int(k) for k in args.n_neighbors.split(",")]
-    leiden_resolution_list = [float(j) for j in args.resolution.split(",")]
-
+def leiden_clustering(X_train, n_neighbors_list, leiden_resolution_list, genome_IDs, cluster_assignments, outpref, write):
     per_iteration_accuracy = []
+    best_params = {"K": None, "resolution": None, "ARI": 0, "AMI": 0}
 
     print("Iterating through nearest neighbours...")
     for n_neighbors in n_neighbors_list:
@@ -68,25 +55,25 @@ def query_model(args, prompt_list, genome_labels, cluster_assignments):
 
             leiden_labels = adata.obs["leiden"].astype(int).to_numpy()
 
-            df_pred = pd.DataFrame(columns=['Taxon', 'predicted_label'])
-            df_pred['Taxon'] = prompt_list_df.iloc[:, 0].values
-            df_pred['predicted_label'] = leiden_labels
-            df_pred.to_csv(args.outpref + f"_K_{n_neighbors}_resolution_{leiden_resolution}_predictions.tsv", sep='\t', index=False)
-
-            if args.prompt_labels != None:
+            if cluster_assignments:
 
                 true_labels = np.array(cluster_assignments)
 
-                df_true = pd.DataFrame(columns=['Taxon', 'predicted_label', 'true_label'])
-                df_true['Taxon'] = prompt_list_df.iloc[:, 0].values
-                df_true['predicted_label'] = leiden_labels
-                df_true['true_label'] = true_labels
+                if write:
+                    df_true = pd.DataFrame(columns=['Taxon', 'predicted_label', 'true_label'])
+                    df_true['Taxon'] = genome_IDs
+                    df_true['predicted_label'] = leiden_labels
+                    df_true['true_label'] = true_labels
 
-                df_true.to_csv(args.outpref + f"_K_{n_neighbors}_resolution_{leiden_resolution}_true.tsv", sep='\t', index=False)
+                    df_true.to_csv(outpref + f"_K_{n_neighbors}_resolution_{leiden_resolution}_true.tsv", sep='\t', index=False)
 
                 ari = adjusted_rand_score(true_labels, leiden_labels)
                 ami = adjusted_mutual_info_score(true_labels, leiden_labels)
                 
+                best_ARI = best_params["ARI"]
+
+                if ari > best_ARI:
+                    best_params = {"K": n_neighbors, "resolution": leiden_resolution, "ARI": ari, "AMI": ami}
 
                 per_iteration_accuracy.append({
                     'K': n_neighbors,
@@ -94,13 +81,39 @@ def query_model(args, prompt_list, genome_labels, cluster_assignments):
                     'ARI': ari,
                     'AMI': ami
                 })
-    
+            else:
+                df_pred = pd.DataFrame(columns=['Taxon', 'predicted_label'])
+                df_pred['Taxon'] = genome_IDs
+                df_pred['predicted_label'] = leiden_labels
+                df_pred.to_csv(outpref + f"_K_{n_neighbors}_resolution_{leiden_resolution}_predictions.tsv", sep='\t', index=False)
 
-    if args.prompt_labels != None:
+    return best_params, per_iteration_accuracy
+
+def query_model(args, prompt_list, genome_labels, cluster_assignments):
+    
+    print("Reading embeddings...")
+    prompt_list_df = pd.read_csv(args.prompt_embeddings, header=None, index_col=False)
+    
+    print("Generating training data...")
+    # add known labels and use k-NN to generate labels for unknown
+    X_train = prompt_list_df.iloc[:, 1:].values  # Features (N-dimensional embeddings)
+    y_train = np.array(cluster_assignments)   # Labels
+
+    X_train = normalize(X_train)
+
+    n_neighbors_list = [int(k) for k in args.n_neighbors.split(",")]
+    leiden_resolution_list = [float(j) for j in args.resolution.split(",")]
+
+    best_params, per_iteration_accuracy = leiden_clustering(X_train, n_neighbors_list, leiden_resolution_list, genome_labels, cluster_assignments, args.outpref, write=False)
+
+    if cluster_assignments:
         per_label_df = pd.DataFrame(per_iteration_accuracy)
 
         # Save to TSV
         per_label_df.to_csv(args.outpref + f"_per_iter_accuracy.tsv", sep='\t', index=False)
+
+        print(best_params)
+        _ = leiden_clustering(X_train, [best_params["K"]], [best_params["resolution"]], genome_labels, cluster_assignments, args.outpref, write=True)
 
 def main():
     args = parse_args_script()
