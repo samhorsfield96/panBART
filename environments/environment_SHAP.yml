@@ -1,4 +1,4 @@
-name: /hps/software/users/jlees/shorsfield/micromamba/envs/panGPT
+name: panBART_SHAP
 channels:
   - conda-forge
   - bioconda
