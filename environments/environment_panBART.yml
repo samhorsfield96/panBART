@@ -1,4 +1,4 @@
-name: panGPT
+name: panBART
 channels:
   - conda-forge
   - bioconda
