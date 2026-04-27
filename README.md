@@ -1,5 +1,7 @@
 
-# PanBART, a pangenome long-context encoder-decoder attention based-architecture and associated analysis scripts.
+# PanBART
+
+PanBART is a pangenome long-context encoder-decoder attention based-architecture using the [LED](https://huggingface.co/docs/transformers/model_doc/led) transfomer architecture.
 
 ## Generating input data
 
@@ -24,3 +26,7 @@ Then run deepspeed training:
 ```
 deepspeed panBART_deepspeed.py --train_file /path/to/training/genomes.txt --val_file /path/to/validation/genomes.txt --test_file /path/to/testing/genomes.txt --model_save_path output_deepspeed.chk --attention_window 512 --log_dir deepspeed_log --batch_size 1 --max_seq_length 7200 --num_heads 8 --num_layers 8 --embed_dim 256 --tokenizer_path tokenizer_deepspeed.json --epochs 300 --prop_masked 0.15 --num_workers 1 --early_stop_patience 10 --min_delta 0.01 --model_dropout_rate 0.4 --deepspeed_config deepspeed_ZS2_fp16.json
 ```
+
+## Analysing PanBART output
+
+PanBART-specific scripts are in the 'analysis_scripts' directory. Additional scripts can be found [here](https://github.com/samhorsfield96/pangenome_LLM).
