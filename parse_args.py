@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from multiprocessing import Manager
 import torch.multiprocessing as mp
-from panGPT import setup, cleanup, GenomeDataset
+from panBART import setup, cleanup, GenomeDataset
 import random
 from torch.utils.data import DataLoader, DistributedSampler
 from collections import defaultdict

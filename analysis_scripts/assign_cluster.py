@@ -1,5 +1,9 @@
-from parse_args import *
+import sys
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from parse_args import *
 from compute_sequence_embedding import *
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, precision_score, recall_score
