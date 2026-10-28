@@ -193,4 +193,4 @@ dependencies:
       - torchaudio==2.3.1
       - torchvision==0.18.1
       - triton==2.3.1
-prefix: /hps/software/users/jlees/shorsfield/miniconda3/envs/panGPT
+prefix: /hps/software/users/jlees/shorsfield/miniconda3/envs/panBART

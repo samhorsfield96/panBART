@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import torch
 import torch.nn as nn
 import math
@@ -12,10 +17,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from multiprocessing import Manager
 import torch.multiprocessing as mp
-from panGPT import setup, cleanup
 import random
 from torch.utils.data import DataLoader, DistributedSampler
-from panGPT import GenomeDataset, load_dataset
+from panBART import setup, cleanup, GenomeDataset, load_dataset
 from collections import defaultdict
 from torch.nn.functional import cosine_similarity
 import pandas as pd
